@@ -1,0 +1,9 @@
+environment              = "development"
+aws_region               = "ap-south-1"
+db_instance_class        = "db.t4g.micro"
+db_backup_retention_days = 7
+deletion_protection      = false
+tags = {
+  Owner      = "LaboraIQ Engineering"
+  CostCentre = "Development"
+}

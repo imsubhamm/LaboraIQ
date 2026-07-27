@@ -1,0 +1,11 @@
+environment              = "production"
+aws_region               = "ap-south-1"
+db_instance_class        = "db.t4g.medium"
+db_allocated_storage     = 100
+db_max_allocated_storage = 500
+db_backup_retention_days = 35
+deletion_protection      = true
+tags = {
+  Owner              = "LaboraIQ Engineering"
+  DataClassification = "Sensitive"
+}
