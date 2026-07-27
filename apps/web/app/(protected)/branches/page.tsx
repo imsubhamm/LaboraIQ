@@ -1,0 +1,3 @@
+import { ResourcePage } from "@/components/resource-page";
+export default function Page() { return <ResourcePage title="Branches" description="Laboratory locations and operational context." endpoint="branches" managePermission="branch.manage" emptyMessage="Add a branch within the current organization." columns={[{key:"code",label:"Code"},{key:"name",label:"Branch"},{key:"time_zone",label:"Time zone"},{key:"status",label:"Status"}]} fields={[{name:"name",label:"Branch name",required:true},{name:"code",label:"Branch code",required:true},{name:"address",label:"Address"},{name:"time_zone",label:"Time zone",required:true}]}/>; }
+

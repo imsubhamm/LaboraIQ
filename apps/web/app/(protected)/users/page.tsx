@@ -1,0 +1,3 @@
+import { ResourcePage } from "@/components/resource-page";
+export default function Page() { return <ResourcePage title="Users" description="Provisioned identities; credentials remain with the identity provider." endpoint="users" managePermission="user.manage" emptyMessage="Provision an identity from the configured provider." columns={[{key:"display_name",label:"User"},{key:"email",label:"Email"},{key:"status",label:"Status"},{key:"last_login_at",label:"Last login"}]} fields={[{name:"display_name",label:"Display name",required:true},{name:"email",label:"Email",type:"email",required:true},{name:"auth_provider_id",label:"Identity provider ID",required:true}]}/>; }
+
