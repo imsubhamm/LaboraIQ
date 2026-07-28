@@ -4,12 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity, Building2, GitBranch, LayoutDashboard, LogOut, Settings,
-  ShieldCheck, Users, ScrollText, FlaskConical
+  ShieldCheck, Users, ScrollText, FlaskConical, ClipboardPlus
 } from "lucide-react";
 import { can, Permission } from "@/lib/auth";
 
 const navigation: Array<[string, string, React.ComponentType<{size?: number}>, Permission?]> = [
   ["/dashboard", "Overview", LayoutDashboard, undefined],
+  ["/patients/new", "Patient intake", ClipboardPlus, "branch.manage"],
   ["/organizations", "Organizations", Building2, "organization.read"],
   ["/branches", "Branches", GitBranch, "branch.read"],
   ["/departments", "Departments", FlaskConical, "branch.read"],
@@ -25,8 +26,8 @@ export function visibleNavigation() {
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
-  function logout() {
-    document.cookie = "labora_session=; Path=/; Max-Age=0";
+  async function logout() {
+    await fetch("/auth/logout", { method: "POST" });
     window.location.assign("/login");
   }
   return (
@@ -59,4 +60,3 @@ export function Shell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-

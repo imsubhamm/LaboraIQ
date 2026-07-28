@@ -9,6 +9,7 @@ from app.models import (
     Organization,
     Permission,
     Role,
+    TestCatalogItem,
     User,
     UserRoleAssignment,
 )
@@ -113,6 +114,35 @@ def seed() -> None:
                         branch_id=branch.id,
                         name=name,
                         code=code,
+                    )
+                )
+
+        test_catalog = [
+            ("CBC", "Complete Blood Count (CBC)", "Whole blood", "EDTA lavender tube", "450.00"),
+            ("LIPID", "Lipid Profile", "Serum", "Clot activator red tube", "900.00"),
+            ("LFT", "Liver Function Test", "Serum", "Clot activator red tube", "850.00"),
+            ("KFT", "Kidney Function Test", "Serum", "Clot activator red tube", "800.00"),
+            ("THYROID", "Thyroid Profile", "Serum", "Clot activator red tube", "950.00"),
+            ("HBA1C", "HbA1c", "Whole blood", "EDTA lavender tube", "650.00"),
+            ("VITD", "Vitamin D", "Serum", "Clot activator red tube", "1400.00"),
+            ("URINE", "Urine Routine", "Urine", "Sterile urine container", "300.00"),
+        ]
+        for test_code, test_name, specimen, container, price in test_catalog:
+            existing_test = db.scalar(
+                select(TestCatalogItem).where(
+                    TestCatalogItem.organization_id == organization.id,
+                    TestCatalogItem.code == test_code,
+                )
+            )
+            if not existing_test:
+                db.add(
+                    TestCatalogItem(
+                        organization_id=organization.id,
+                        code=test_code,
+                        name=test_name,
+                        specimen_type=specimen,
+                        container_type=container,
+                        price=price,
                     )
                 )
 

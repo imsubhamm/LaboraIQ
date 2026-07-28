@@ -5,8 +5,17 @@ Revises:
 """
 
 from alembic import op
-from app import models  # noqa: F401
-from app.database import Base
+from app.models import (
+    AuditEvent,
+    Branch,
+    Department,
+    Organization,
+    Permission,
+    Role,
+    RolePermission,
+    User,
+    UserRoleAssignment,
+)
 
 revision = "20260727_0001"
 down_revision = None
@@ -16,7 +25,18 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    Base.metadata.create_all(bind=bind)
+    for table in [
+        Organization.__table__,
+        Branch.__table__,
+        Department.__table__,
+        User.__table__,
+        Role.__table__,
+        Permission.__table__,
+        RolePermission.__table__,
+        UserRoleAssignment.__table__,
+        AuditEvent.__table__,
+    ]:
+        table.create(bind=bind, checkfirst=True)
     if bind.dialect.name == "postgresql":
         op.execute(
             """
@@ -42,4 +62,15 @@ def downgrade() -> None:
     if bind.dialect.name == "postgresql":
         op.execute("DROP TRIGGER IF EXISTS audit_events_immutable ON audit_events")
         op.execute("DROP FUNCTION IF EXISTS prevent_audit_event_mutation")
-    Base.metadata.drop_all(bind=bind)
+    for table in [
+        AuditEvent.__table__,
+        UserRoleAssignment.__table__,
+        RolePermission.__table__,
+        Permission.__table__,
+        Role.__table__,
+        User.__table__,
+        Department.__table__,
+        Branch.__table__,
+        Organization.__table__,
+    ]:
+        table.drop(bind=bind, checkfirst=True)

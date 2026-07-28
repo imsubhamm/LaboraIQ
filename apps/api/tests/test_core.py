@@ -1,8 +1,21 @@
+import uuid
+
 import pytest
 from app.auth import AuthContext, get_auth_context
 from app.config import Settings
 from app.main import app
-from app.models import AuditEvent, Branch, Organization, Permission, Role, User
+from app.models import (
+    AuditEvent,
+    Branch,
+    LabOrder,
+    Organization,
+    Patient,
+    PatientHistory,
+    Permission,
+    Role,
+    TestCatalogItem,
+    User,
+)
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -176,3 +189,63 @@ def test_validation_error(client: TestClient) -> None:
 def test_environment_origin_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CORS_ORIGINS", "https://admin.example.com,http://localhost:3000")
     assert Settings().cors_origins == ["https://admin.example.com", "http://localhost:3000"]
+
+
+def test_returning_patient_is_updated_and_history_is_appended(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    branch = Branch(
+        organization_id=context.organization_id, name="Central", code="CENTRAL"
+    )
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="CBC",
+        name="Complete Blood Count",
+        specimen_type="Whole blood",
+        container_type="EDTA tube",
+        price="450.00",
+    )
+    db.add_all([branch, test])
+    db.commit()
+    payload = {
+        "full_name": "Returning Patient",
+        "phone": "+919876543210",
+        "email": "returning@example.com",
+        "age_years": 35,
+        "sex": "Female",
+        "blood_group": "O+",
+        "country": "India",
+        "race": "Asian",
+        "nationality": "Indian",
+        "visit_type": "OP",
+        "department": "Medicine",
+        "ward": "OP Clinic",
+        "doctor_name": "Dr Example",
+        "diagnosis": "Z00.0 General examination",
+        "additional_patient_data": {"MRN": "MRN-1001", "VIP Indicator": ""},
+        "test_ids": [str(test.id)],
+    }
+    first = client.post("/api/v1/intake-workflows", json=payload)
+    assert first.status_code == 201
+    patient_id = first.json()["patient_id"]
+
+    lookup = client.get("/api/v1/patients/lookup", params={"query": "+919876543210"})
+    assert lookup.status_code == 200
+    assert lookup.json()["id"] == patient_id
+    assert lookup.json()["visit_count"] == 1
+    assert lookup.json()["additional_patient_data"] == {"MRN": "MRN-1001"}
+
+    payload.update(
+        {
+            "patient_id": patient_id,
+            "full_name": "Returning Patient Corrected",
+            "diagnosis": "E11 Type 2 diabetes",
+        }
+    )
+    second = client.post("/api/v1/intake-workflows", json=payload)
+    assert second.status_code == 201
+    assert second.json()["patient_id"] == patient_id
+    assert db.query(Patient).count() == 1
+    assert db.query(LabOrder).count() == 2
+    assert db.query(PatientHistory).count() == 2
+    assert db.get(Patient, uuid.UUID(patient_id)).full_name == "Returning Patient Corrected"

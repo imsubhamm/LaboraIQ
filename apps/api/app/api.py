@@ -1,9 +1,10 @@
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -14,9 +15,16 @@ from app.models import (
     AuditEvent,
     Branch,
     Department,
+    Invoice,
+    LabOrder,
+    OrderTest,
     Organization,
+    Patient,
+    PatientHistory,
     Permission,
     Role,
+    Specimen,
+    TestCatalogItem,
     User,
     UserRoleAssignment,
 )
@@ -30,13 +38,21 @@ from app.schemas import (
     DepartmentCreate,
     DepartmentRead,
     DepartmentUpdate,
+    IntakeCreate,
+    IntakeRead,
     OrganizationCreate,
     OrganizationRead,
     OrganizationUpdate,
     Page,
+    PaymentCreate,
+    PaymentRead,
+    PaymentSummary,
+    PatientLookupRead,
     PermissionRead,
     RoleCreate,
     RoleRead,
+    SpecimenRead,
+    TestCatalogRead,
     UserCreate,
     UserRead,
     UserUpdate,
@@ -595,3 +611,374 @@ def get_audit_event(
     if not context.can_access_branch(event_record.branch_id):
         raise HTTPException(status_code=403, detail="Branch access denied")
     return event_record
+
+
+@router.get("/test-catalog", response_model=list[TestCatalogRead])
+def list_test_catalog(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
+) -> list[TestCatalogItem]:
+    return list(
+        db.scalars(
+            select(TestCatalogItem)
+            .where(
+                TestCatalogItem.organization_id == context.organization_id,
+                TestCatalogItem.status == "active",
+            )
+            .order_by(TestCatalogItem.name, TestCatalogItem.id)
+        ).all()
+    )
+
+
+@router.get("/patients/lookup", response_model=PatientLookupRead | None)
+def lookup_patient(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
+    query: Annotated[str, Query(min_length=3, max_length=320)],
+) -> PatientLookupRead | None:
+    """Find a returning patient by UUID, patient number, phone, or email."""
+    value = query.strip()
+    conditions = [
+        Patient.patient_number == value,
+        func.lower(Patient.email) == value.lower(),
+        Patient.phone == value,
+    ]
+    try:
+        conditions.append(Patient.id == uuid.UUID(value))
+    except ValueError:
+        pass
+    patient = db.scalar(
+        select(Patient).where(
+            Patient.organization_id == context.organization_id,
+            or_(*conditions),
+        )
+    )
+    if patient is None:
+        return None
+    visit_count, last_visit_at = db.execute(
+        select(func.count(LabOrder.id), func.max(LabOrder.created_at)).where(
+            LabOrder.organization_id == context.organization_id,
+            LabOrder.patient_id == patient.id,
+        )
+    ).one()
+    return PatientLookupRead(
+        **{
+            key: getattr(patient, key)
+            for key in (
+                "id",
+                "patient_number",
+                "full_name",
+                "phone",
+                "email",
+                "date_of_birth",
+                "age_years",
+                "sex",
+                "address",
+                "blood_group",
+                "country",
+                "race",
+                "nationality",
+                "additional_patient_data",
+            )
+        },
+        visit_count=visit_count,
+        last_visit_at=last_visit_at,
+    )
+
+
+@router.post("/intake-workflows", response_model=IntakeRead, status_code=201)
+def create_intake_workflow(
+    payload: IntakeCreate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.manage"))],
+) -> IntakeRead:
+    branch_statement = select(Branch).where(Branch.organization_id == context.organization_id)
+    if not context.is_organization_scoped:
+        branch_statement = branch_statement.where(Branch.id.in_(context.branch_ids))
+    branch = db.scalar(branch_statement.order_by(Branch.code))
+    if branch is None:
+        raise HTTPException(status_code=422, detail="No accessible branch is configured")
+
+    catalog_items = list(
+        db.scalars(
+            select(TestCatalogItem).where(
+                TestCatalogItem.organization_id == context.organization_id,
+                TestCatalogItem.id.in_(payload.test_ids),
+                TestCatalogItem.status == "active",
+            )
+        ).all()
+    )
+    if len(catalog_items) != len(set(payload.test_ids)):
+        raise HTTPException(status_code=422, detail="One or more tests are unavailable")
+
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    suffix = uuid.uuid4().hex[:6].upper()
+    normalized_email = str(payload.email).strip().lower()
+    patient = None
+    if payload.patient_id:
+        patient = db.scalar(
+            select(Patient).where(
+                Patient.id == payload.patient_id,
+                Patient.organization_id == context.organization_id,
+            )
+        )
+        if patient is None:
+            raise HTTPException(status_code=404, detail="Patient not found")
+    else:
+        matches = list(
+            db.scalars(
+                select(Patient).where(
+                    Patient.organization_id == context.organization_id,
+                    or_(
+                        Patient.phone == payload.phone.strip(),
+                        func.lower(Patient.email) == normalized_email,
+                    ),
+                )
+            ).all()
+        )
+        if len({item.id for item in matches}) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Phone and email match different patients; search and select the correct patient",
+            )
+        patient = matches[0] if matches else None
+
+    optional_patient_data = {
+        key: value.strip()
+        for key, value in payload.additional_patient_data.items()
+        if value.strip()
+    }
+    patient_values = {
+        "full_name": payload.full_name.strip() if payload.full_name else "Unknown patient",
+        "date_of_birth": payload.date_of_birth,
+        "age_years": payload.age_years,
+        "sex": payload.sex,
+        "phone": payload.phone.strip(),
+        "email": normalized_email,
+        "address": payload.address,
+        "blood_group": payload.blood_group,
+        "country": payload.country,
+        "race": payload.race,
+        "nationality": payload.nationality,
+        "additional_patient_data": optional_patient_data,
+    }
+    patient_created = patient is None
+    if patient is None:
+        patient = Patient(
+            organization_id=context.organization_id,
+            patient_number=f"PT-{stamp}-{suffix}",
+            **patient_values,
+        )
+        db.add(patient)
+        flush(db)
+    else:
+        for key, value in patient_values.items():
+            setattr(patient, key, value)
+    order = LabOrder(
+        organization_id=context.organization_id,
+        branch_id=branch.id,
+        patient_id=patient.id,
+        order_number=f"ORD-{stamp}-{suffix}",
+        visit_type=payload.visit_type,
+        department=payload.department,
+        ward=payload.ward,
+        doctor_name=payload.doctor_name,
+        diagnosis=payload.diagnosis,
+        prescription_filename=payload.prescription_filename,
+        notes=payload.notes,
+    )
+    db.add(order)
+    flush(db)
+    db.add(
+        PatientHistory(
+            organization_id=context.organization_id,
+            patient_id=patient.id,
+            order_id=order.id,
+            recorded_by=context.user_id,
+            demographics={
+                **{
+                    key: (value.isoformat() if hasattr(value, "isoformat") else value)
+                    for key, value in patient_values.items()
+                },
+                "visit_type": payload.visit_type,
+                "department": payload.department,
+                "ward": payload.ward,
+                "doctor_name": payload.doctor_name,
+                "diagnosis": payload.diagnosis,
+            },
+        )
+    )
+
+    subtotal = sum((item.price for item in catalog_items), start=Decimal("0"))
+    if payload.discount > subtotal:
+        raise HTTPException(status_code=422, detail="Discount cannot exceed subtotal")
+    for item in catalog_items:
+        db.add(OrderTest(order_id=order.id, test_id=item.id, price=item.price))
+    invoice = Invoice(
+        organization_id=context.organization_id,
+        order_id=order.id,
+        invoice_number=f"INV-{stamp}-{suffix}",
+        subtotal=subtotal,
+        discount=payload.discount,
+        total=subtotal - payload.discount,
+    )
+    db.add(invoice)
+
+    record_event(
+        db,
+        request,
+        context,
+        event_type="intake.registered",
+        entity_type="lab_order",
+        entity_id=order.id,
+        branch_id=branch.id,
+        action="create",
+        new={
+            "patient_number": patient.patient_number,
+            "order_number": order.order_number,
+            "test_count": len(catalog_items),
+            "invoice_number": invoice.invoice_number,
+            "payment_status": "pending",
+            "patient_created": patient_created,
+        },
+    )
+    commit(db)
+    return IntakeRead(
+        patient_id=patient.id,
+        patient_number=patient.patient_number,
+        order_id=order.id,
+        order_number=order.order_number,
+        invoice_number=invoice.invoice_number,
+        subtotal=invoice.subtotal,
+        discount=invoice.discount,
+        total=invoice.total,
+        payment_status=invoice.payment_status,
+        specimens=[],
+    )
+
+
+def payment_summary(
+    db: Session, order_id: uuid.UUID, context: AuthContext
+) -> tuple[LabOrder, Patient, Invoice]:
+    order = get_tenant_record(db, LabOrder, order_id, context)
+    if not context.can_access_branch(order.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    patient = db.get(Patient, order.patient_id)
+    invoice = db.scalar(
+        select(Invoice).where(
+            Invoice.organization_id == context.organization_id,
+            Invoice.order_id == order.id,
+        )
+    )
+    if patient is None or invoice is None:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    return order, patient, invoice
+
+
+@router.get("/orders/{order_id}/payment", response_model=PaymentSummary)
+def get_payment_summary(
+    order_id: uuid.UUID,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
+) -> PaymentSummary:
+    order, patient, invoice = payment_summary(db, order_id, context)
+    return PaymentSummary(
+        order_id=order.id,
+        order_number=order.order_number,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        invoice_number=invoice.invoice_number,
+        total=invoice.total,
+        payment_status=invoice.payment_status,
+    )
+
+
+@router.post("/orders/{order_id}/payment", response_model=PaymentRead)
+def record_payment(
+    order_id: uuid.UUID,
+    payload: PaymentCreate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.manage"))],
+) -> PaymentRead:
+    order, patient, invoice = payment_summary(db, order_id, context)
+    transaction_id = payload.transaction_id.strip() if payload.transaction_id else None
+    if payload.payment_method in {"UPI", "CARD"} and not transaction_id:
+        raise HTTPException(status_code=422, detail="Transaction ID is required for UPI or card")
+    if payload.payment_method == "CASH":
+        transaction_id = None
+
+    if invoice.payment_status != "paid":
+        invoice.payment_status = "paid"
+        invoice.payment_method = payload.payment_method
+        invoice.transaction_id = transaction_id
+        invoice.paid_at = datetime.now(UTC)
+        order.status = "awaiting_collection"
+
+        catalog_items = list(
+            db.scalars(
+                select(TestCatalogItem)
+                .join(OrderTest, OrderTest.test_id == TestCatalogItem.id)
+                .where(OrderTest.order_id == order.id)
+            ).all()
+        )
+        specimen_groups = sorted(
+            {(item.specimen_type, item.container_type) for item in catalog_items}
+        )
+        suffix = order.order_number.rsplit("-", 1)[-1]
+        stamp = datetime.now(UTC).strftime("%m%d%H%M%S")
+        for index, (specimen_type, container_type) in enumerate(specimen_groups, start=1):
+            db.add(
+                Specimen(
+                    organization_id=context.organization_id,
+                    branch_id=order.branch_id,
+                    order_id=order.id,
+                    barcode=f"LQ{stamp}{suffix}{index:02d}",
+                    specimen_type=specimen_type,
+                    container_type=container_type,
+                )
+            )
+        record_event(
+            db,
+            request,
+            context,
+            event_type="payment.recorded",
+            entity_type="invoice",
+            entity_id=invoice.id,
+            branch_id=order.branch_id,
+            action="pay",
+            previous={"payment_status": "pending"},
+            new={
+                "payment_status": "paid",
+                "payment_method": payload.payment_method,
+                "transaction_id": transaction_id,
+            },
+        )
+        commit(db)
+
+    specimens = list(
+        db.scalars(
+            select(Specimen)
+            .where(
+                Specimen.organization_id == context.organization_id,
+                Specimen.order_id == order.id,
+            )
+            .order_by(Specimen.barcode)
+        ).all()
+    )
+    assert invoice.paid_at is not None
+    assert invoice.payment_method is not None
+    return PaymentRead(
+        order_id=order.id,
+        order_number=order.order_number,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        invoice_number=invoice.invoice_number,
+        total=invoice.total,
+        payment_status=invoice.payment_status,
+        payment_method=invoice.payment_method,
+        transaction_id=invoice.transaction_id,
+        paid_at=invoice.paid_at,
+        specimens=[SpecimenRead.model_validate(item) for item in specimens],
+    )

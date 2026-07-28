@@ -15,5 +15,6 @@ htmlcov/
 *.tfstate.*
 .terraform/
 *.tfvars
+*.db
 !infrastructure/terraform/environments/*.tfvars.example
 sales/prospects/*.csv

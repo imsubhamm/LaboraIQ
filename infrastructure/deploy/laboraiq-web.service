@@ -1,0 +1,22 @@
+[Unit]
+Description=LaboraIQ Next.js service
+After=network-online.target laboraiq-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/laboraiq/apps/web
+EnvironmentFile=/opt/laboraiq/.env
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3100
+ExecStart=/usr/bin/node /opt/laboraiq/apps/web/.next/standalone/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

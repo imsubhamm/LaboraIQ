@@ -1,0 +1,22 @@
+[Unit]
+Description=LaboraIQ FastAPI service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/laboraiq/apps/api
+EnvironmentFile=/opt/laboraiq/.env
+Environment=ENVIRONMENT=production
+Environment=CORS_ORIGINS=http://16.16.97.239
+ExecStartPre=/opt/laboraiq/apps/api/.venv/bin/alembic upgrade head
+ExecStart=/opt/laboraiq/apps/api/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

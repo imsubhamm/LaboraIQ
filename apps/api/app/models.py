@@ -1,6 +1,7 @@
 import enum
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -10,6 +11,8 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -152,3 +155,110 @@ class AuditEvent(Base):
     user_agent: Mapped[str | None] = mapped_column(String(512))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     additional_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class Patient(Base, TimestampMixin):
+    __tablename__ = "patients"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "patient_number", name="uq_patient_number"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    patient_number: Mapped[str] = mapped_column(String(40))
+    full_name: Mapped[str] = mapped_column(String(200))
+    date_of_birth: Mapped[date | None]
+    age_years: Mapped[int | None] = mapped_column(Integer)
+    sex: Mapped[str | None] = mapped_column(String(30))
+    phone: Mapped[str] = mapped_column(String(40))
+    email: Mapped[str | None] = mapped_column(String(320))
+    address: Mapped[str | None] = mapped_column(Text)
+    blood_group: Mapped[str | None] = mapped_column(String(10))
+    country: Mapped[str | None] = mapped_column(String(100))
+    race: Mapped[str | None] = mapped_column(String(100))
+    nationality: Mapped[str | None] = mapped_column(String(100))
+    additional_patient_data: Mapped[dict[str, str] | None] = mapped_column(JSON)
+
+
+class PatientHistory(Base):
+    """Immutable demographic snapshot recorded for every patient visit."""
+
+    __tablename__ = "patient_history"
+    __table_args__ = (Index("ix_patient_history_patient_recorded", "patient_id", "recorded_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("patients.id"), index=True)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("lab_orders.id"), index=True)
+    demographics: Mapped[dict[str, Any]] = mapped_column(JSON)
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class TestCatalogItem(Base, TimestampMixin):
+    __tablename__ = "test_catalog_items"
+    __table_args__ = (UniqueConstraint("organization_id", "code", name="uq_test_catalog_code"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    code: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(200))
+    specimen_type: Mapped[str] = mapped_column(String(80))
+    container_type: Mapped[str] = mapped_column(String(100))
+    price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active)
+
+
+class LabOrder(Base, TimestampMixin):
+    __tablename__ = "lab_orders"
+    __table_args__ = (UniqueConstraint("organization_id", "order_number", name="uq_order_number"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("patients.id"), index=True)
+    order_number: Mapped[str] = mapped_column(String(40))
+    visit_type: Mapped[str] = mapped_column(String(20))
+    department: Mapped[str | None] = mapped_column(String(120))
+    ward: Mapped[str | None] = mapped_column(String(120))
+    doctor_name: Mapped[str] = mapped_column(String(200))
+    diagnosis: Mapped[str | None] = mapped_column(Text)
+    prescription_filename: Mapped[str | None] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(40), default="registered")
+
+
+class OrderTest(Base):
+    __tablename__ = "order_tests"
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lab_orders.id"), primary_key=True)
+    test_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("test_catalog_items.id"), primary_key=True
+    )
+    price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+
+
+class Invoice(Base, TimestampMixin):
+    __tablename__ = "invoices"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "invoice_number", name="uq_invoice_number"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lab_orders.id"), unique=True)
+    invoice_number: Mapped[str] = mapped_column(String(40))
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+    total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    payment_status: Mapped[str] = mapped_column(String(30), default="pending")
+    payment_method: Mapped[str | None] = mapped_column(String(20))
+    transaction_id: Mapped[str | None] = mapped_column(String(120))
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Specimen(Base, TimestampMixin):
+    __tablename__ = "specimens"
+    __table_args__ = (UniqueConstraint("organization_id", "barcode", name="uq_specimen_barcode"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lab_orders.id"), index=True)
+    barcode: Mapped[str] = mapped_column(String(60))
+    specimen_type: Mapped[str] = mapped_column(String(80))
+    container_type: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(40), default="awaiting_collection")
