@@ -2,7 +2,7 @@ export type Page<T> = { items: T[]; total: number; limit: number; offset: number
 export type RecordValue = string | number | boolean | null | undefined;
 export type ApiRecord = Record<string, RecordValue>;
 
-const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -30,4 +30,3 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
-
