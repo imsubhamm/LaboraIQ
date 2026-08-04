@@ -77,6 +77,26 @@ class Department(Base, TimestampMixin):
     status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active)
 
 
+class Analyzer(Base, TimestampMixin):
+    __tablename__ = "analyzers"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "branch_id", "code", name="uq_analyzer_scope_code"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    code: Mapped[str] = mapped_column(String(40))
+    vendor: Mapped[str] = mapped_column(String(120))
+    model: Mapped[str] = mapped_column(String(120))
+    protocol: Mapped[str] = mapped_column(String(30))
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer)
+    connection_mode: Mapped[str] = mapped_column(String(20), default="bidirectional")
+    status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
 class User(Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("organization_id", "email", name="uq_user_org_email"),)
@@ -200,10 +220,33 @@ class TestCatalogItem(Base, TimestampMixin):
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     code: Mapped[str] = mapped_column(String(40))
     name: Mapped[str] = mapped_column(String(200))
+    service_type: Mapped[str] = mapped_column(String(80), default="Pathology")
+    department: Mapped[str] = mapped_column(String(120), default="Laboratory")
+    sub_department: Mapped[str] = mapped_column(String(120), default="")
     specimen_type: Mapped[str] = mapped_column(String(80))
     container_type: Mapped[str] = mapped_column(String(100))
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    is_panel: Mapped[bool] = mapped_column(Boolean, default=False)
+    validation_status: Mapped[str] = mapped_column(String(30), default="validated")
     status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active)
+    parameters: Mapped[list["TestCatalogParameter"]] = relationship(
+        back_populates="test", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class TestCatalogParameter(Base, TimestampMixin):
+    __tablename__ = "test_catalog_parameters"
+    __table_args__ = (
+        UniqueConstraint("test_id", "external_code", name="uq_test_parameter_external_code"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    test_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("test_catalog_items.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    external_code: Mapped[str] = mapped_column(String(255))
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    test: Mapped[TestCatalogItem] = relationship(back_populates="parameters")
 
 
 class LabOrder(Base, TimestampMixin):
@@ -261,4 +304,17 @@ class Specimen(Base, TimestampMixin):
     barcode: Mapped[str] = mapped_column(String(60))
     specimen_type: Mapped[str] = mapped_column(String(80))
     container_type: Mapped[str] = mapped_column(String(100))
+    laboratory_department: Mapped[str | None] = mapped_column(String(120), index=True)
+    accession_number: Mapped[str | None] = mapped_column(String(60), index=True)
+    collection_location: Mapped[str | None] = mapped_column(String(200))
+    container_count: Mapped[int] = mapped_column(Integer, default=1)
+    collection_notes: Mapped[str | None] = mapped_column(Text)
+    collected_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(String(120))
+    rejection_notes: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="awaiting_collection")

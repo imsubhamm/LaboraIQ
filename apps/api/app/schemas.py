@@ -1,9 +1,10 @@
+import ipaddress
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models import Status
 
@@ -73,6 +74,56 @@ class DepartmentUpdate(APIModel):
 
 
 class DepartmentRead(DepartmentCreate):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    status: Status
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalyzerCreate(APIModel):
+    branch_id: uuid.UUID
+    code: str = Field(pattern=r"^[A-Z0-9_-]{2,40}$")
+    vendor: str = Field(min_length=2, max_length=120)
+    model: str = Field(min_length=1, max_length=120)
+    protocol: str = Field(pattern=r"^(ASTM|HL7_LAW|PROPRIETARY)$")
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    connection_mode: str = Field(
+        default="bidirectional", pattern=r"^(unidirectional|bidirectional)$"
+    )
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        try:
+            ipaddress.ip_address(value)
+        except ValueError as error:
+            raise ValueError("host must be a valid IPv4 or IPv6 address") from error
+        return value
+
+
+class AnalyzerUpdate(APIModel):
+    vendor: str | None = Field(default=None, min_length=2, max_length=120)
+    model: str | None = Field(default=None, min_length=1, max_length=120)
+    protocol: str | None = Field(default=None, pattern=r"^(ASTM|HL7_LAW|PROPRIETARY)$")
+    host: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    connection_mode: str | None = Field(default=None, pattern=r"^(unidirectional|bidirectional)$")
+    status: Status | None = None
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                ipaddress.ip_address(value)
+            except ValueError as error:
+                raise ValueError("host must be a valid IPv4 or IPv6 address") from error
+        return value
+
+
+class AnalyzerRead(AnalyzerCreate):
     id: uuid.UUID
     organization_id: uuid.UUID
     status: Status
@@ -171,6 +222,44 @@ class TestCatalogRead(APIModel):
     price: Decimal
 
 
+class TestParameterRead(APIModel):
+    id: uuid.UUID
+    name: str
+    external_code: str
+    display_order: int
+
+
+class TestMasterCreate(APIModel):
+    code: str = Field(pattern=r"^[A-Za-z0-9_-]{2,40}$")
+    name: str = Field(min_length=2, max_length=200)
+    service_type: str = Field(default="Pathology", min_length=2, max_length=80)
+    department: str = Field(default="Laboratory", min_length=2, max_length=120)
+    sub_department: str = Field(default="", max_length=120)
+    specimen_type: str = Field(min_length=2, max_length=80)
+    container_type: str = Field(default="Unspecified", min_length=2, max_length=100)
+    price: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class TestMasterRead(TestMasterCreate):
+    id: uuid.UUID
+    is_panel: bool
+    validation_status: str
+    status: Status
+    parameters: list[TestParameterRead]
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestMasterImportRead(APIModel):
+    rows_received: int
+    tests_created: int
+    tests_updated: int
+    parameters_imported: int
+    rows_rejected: int
+    review_required: int
+    errors: list[str]
+
+
 class IntakeCreate(APIModel):
     patient_id: uuid.UUID | None = None
     full_name: str | None = Field(default=None, max_length=200)
@@ -201,6 +290,36 @@ class SpecimenRead(APIModel):
     specimen_type: str
     container_type: str
     status: str
+
+
+class SpecimenWorkflowRead(SpecimenRead):
+    id: uuid.UUID
+    order_id: uuid.UUID
+    order_number: str
+    patient_number: str
+    patient_name: str
+    laboratory_department: str | None
+    accession_number: str | None
+    collection_location: str | None
+    container_count: int
+    collection_notes: str | None
+    collected_at: datetime | None
+    received_at: datetime | None
+    reviewed_at: datetime | None
+    rejection_reason: str | None
+    rejection_notes: str | None
+
+
+class SpecimenCollect(APIModel):
+    collection_location: str = Field(min_length=2, max_length=200)
+    container_count: int = Field(default=1, ge=1, le=20)
+    collection_notes: str | None = Field(default=None, max_length=2000)
+
+
+class SpecimenDecision(APIModel):
+    decision: str = Field(pattern=r"^(accept|reject)$")
+    rejection_reason: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 class IntakeRead(APIModel):

@@ -3,7 +3,18 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,6 +23,7 @@ from app.audit import record_event
 from app.auth import AuthContext, require_permission
 from app.database import get_db
 from app.models import (
+    Analyzer,
     AuditEvent,
     Branch,
     Department,
@@ -25,10 +37,14 @@ from app.models import (
     Role,
     Specimen,
     TestCatalogItem,
+    TestCatalogParameter,
     User,
     UserRoleAssignment,
 )
 from app.schemas import (
+    AnalyzerCreate,
+    AnalyzerRead,
+    AnalyzerUpdate,
     AssignmentCreate,
     AssignmentRead,
     AuditEventRead,
@@ -44,15 +60,21 @@ from app.schemas import (
     OrganizationRead,
     OrganizationUpdate,
     Page,
+    PatientLookupRead,
     PaymentCreate,
     PaymentRead,
     PaymentSummary,
-    PatientLookupRead,
     PermissionRead,
     RoleCreate,
     RoleRead,
+    SpecimenCollect,
+    SpecimenDecision,
     SpecimenRead,
+    SpecimenWorkflowRead,
     TestCatalogRead,
+    TestMasterCreate,
+    TestMasterImportRead,
+    TestMasterRead,
     UserCreate,
     UserRead,
     UserUpdate,
@@ -104,7 +126,13 @@ def get_tenant_record(
 
 
 def snapshot(record: Any, keys: list[str]) -> dict[str, Any]:
-    return {key: getattr(record, key) for key in keys}
+    return jsonable_encoder({key: getattr(record, key) for key in keys})
+
+
+ANALYZER_FIELDS = [
+    "branch_id", "code", "vendor", "model", "protocol", "host", "port",
+    "connection_mode", "status",
+]
 
 
 @router.get("/health")
@@ -116,6 +144,75 @@ def health() -> dict[str, str]:
 def ready(db: Db) -> dict[str, str]:
     db.execute(select(1))
     return {"status": "ready"}
+
+
+@router.get("/analyzers", response_model=Page[AnalyzerRead])
+def list_analyzers(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+    branch_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[AnalyzerRead]:
+    statement = select(Analyzer).where(Analyzer.organization_id == context.organization_id)
+    if not context.is_organization_scoped:
+        statement = statement.where(Analyzer.branch_id.in_(context.branch_ids))
+    if branch_id:
+        if not context.can_access_branch(branch_id):
+            raise HTTPException(status_code=403, detail="Branch access denied")
+        statement = statement.where(Analyzer.branch_id == branch_id)
+    return page(db, statement.order_by(Analyzer.code, Analyzer.id), AnalyzerRead, limit, offset)
+
+
+@router.post("/analyzers", response_model=AnalyzerRead, status_code=201)
+def create_analyzer(
+    payload: AnalyzerCreate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> Analyzer:
+    get_branch(payload.branch_id, db, context)
+    analyzer = Analyzer(
+        **payload.model_dump(),
+        organization_id=context.organization_id,
+        created_by=context.user_id,
+        updated_by=context.user_id,
+    )
+    db.add(analyzer)
+    flush(db)
+    record_event(
+        db, request, context,
+        event_type="analyzer.created", entity_type="analyzer", entity_id=analyzer.id,
+        branch_id=analyzer.branch_id, action="create",
+        new=snapshot(analyzer, ANALYZER_FIELDS),
+    )
+    commit(db)
+    return analyzer
+
+
+@router.patch("/analyzers/{analyzer_id}", response_model=AnalyzerRead)
+def update_analyzer(
+    analyzer_id: uuid.UUID,
+    payload: AnalyzerUpdate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> Analyzer:
+    analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
+    if not context.can_access_branch(analyzer.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    previous = snapshot(analyzer, ANALYZER_FIELDS)
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(analyzer, key, value)
+    analyzer.updated_by = context.user_id
+    record_event(
+        db, request, context,
+        event_type="analyzer.updated", entity_type="analyzer", entity_id=analyzer.id,
+        branch_id=analyzer.branch_id, action="update", previous=previous,
+        new=snapshot(analyzer, ANALYZER_FIELDS),
+    )
+    commit(db)
+    return analyzer
 
 
 @router.get("/organizations", response_model=Page[OrganizationRead])
@@ -630,6 +727,204 @@ def list_test_catalog(
     )
 
 
+@router.get("/test-master", response_model=Page[TestMasterRead])
+def list_test_master(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("test_master.read"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    review_only: bool = False,
+) -> Page[TestMasterRead]:
+    statement = select(TestCatalogItem).where(
+        TestCatalogItem.organization_id == context.organization_id
+    )
+    if search:
+        term = f"%{search.strip().lower()}%"
+        statement = statement.where(
+            or_(
+                func.lower(TestCatalogItem.code).like(term),
+                func.lower(TestCatalogItem.name).like(term),
+                func.lower(TestCatalogItem.sub_department).like(term),
+                func.lower(TestCatalogItem.specimen_type).like(term),
+            )
+        )
+    if review_only:
+        statement = statement.where(TestCatalogItem.validation_status == "needs_review")
+    return page(
+        db,
+        statement.order_by(TestCatalogItem.name, TestCatalogItem.id),
+        TestMasterRead,
+        limit,
+        offset,
+    )
+
+
+@router.post("/test-master", response_model=TestMasterRead, status_code=201)
+def create_test_master_item(
+    payload: TestMasterCreate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("test_master.manage"))],
+) -> TestCatalogItem:
+    item = TestCatalogItem(
+        **payload.model_dump(),
+        organization_id=context.organization_id,
+        is_panel=False,
+        validation_status=(
+            "needs_review" if payload.specimen_type.strip().lower() == "specimen" else "validated"
+        ),
+    )
+    db.add(item)
+    flush(db)
+    record_event(
+        db,
+        request,
+        context,
+        event_type="test_master.created",
+        entity_type="test_master",
+        entity_id=item.id,
+        action="create",
+        new=payload.model_dump(mode="json"),
+    )
+    commit(db)
+    return item
+
+
+@router.post("/test-master/import", response_model=TestMasterImportRead)
+async def import_test_master(
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("test_master.manage"))],
+    file: Annotated[UploadFile, File(description="LIS/HIS Test Master .xlsx workbook")],
+) -> TestMasterImportRead:
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=422, detail="Upload an .xlsx test master workbook")
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    try:
+        workbook = load_workbook(BytesIO(await file.read()), read_only=True, data_only=True)
+        sheet = workbook[workbook.sheetnames[0]]
+        rows = sheet.iter_rows(values_only=True)
+        headers = [str(value or "").strip().upper() for value in next(rows)]
+    except Exception as error:
+        raise HTTPException(status_code=422, detail="The workbook could not be read") from error
+    required = {
+        "SERVICE TYPE",
+        "DEPARTMENT",
+        "SUB DEPARTMENT",
+        "SERVICE CODE",
+        "SERVICE NAME",
+        "SPECIMEN",
+        "PARAMETER CODE",
+        "PARAMETER DESCRIPTION",
+    }
+    if not required.issubset(headers):
+        missing = ", ".join(sorted(required.difference(headers)))
+        raise HTTPException(status_code=422, detail=f"Missing columns: {missing}")
+    positions = {name: headers.index(name) for name in required}
+    grouped: dict[str, dict[str, Any]] = {}
+    rejected = 0
+    errors: list[str] = []
+    row_count = 0
+
+    def cell_value(row: tuple[Any, ...], key: str) -> str:
+        return str(row[positions[key]] or "").strip()
+
+    for row_number, row in enumerate(rows, start=2):
+        row_count += 1
+        code = cell_value(row, "SERVICE CODE")
+        name = cell_value(row, "SERVICE NAME")
+        if not code or not name:
+            rejected += 1
+            if len(errors) < 20:
+                errors.append(f"Row {row_number}: service code and service name are required")
+            continue
+        entry = grouped.setdefault(
+            code,
+            {
+                "name": name,
+                "service_type": cell_value(row, "SERVICE TYPE") or "Pathology",
+                "department": cell_value(row, "DEPARTMENT") or "Laboratory",
+                "sub_department": cell_value(row, "SUB DEPARTMENT"),
+                "specimen_type": cell_value(row, "SPECIMEN") or "specimen",
+                "parameters": [],
+            },
+        )
+        parameter_name = cell_value(row, "PARAMETER CODE")
+        external_code = cell_value(row, "PARAMETER DESCRIPTION")
+        if parameter_name or external_code:
+            if parameter_name and external_code:
+                entry["parameters"].append((parameter_name, external_code))
+            else:
+                rejected += 1
+                if len(errors) < 20:
+                    errors.append(
+                        f"Row {row_number}: parameter name and identifier must both be present"
+                    )
+    created = updated = parameter_count = review_required = 0
+    for code, entry in grouped.items():
+        item = db.scalar(
+            select(TestCatalogItem).where(
+                TestCatalogItem.organization_id == context.organization_id,
+                TestCatalogItem.code == code,
+            )
+        )
+        needs_review = entry["specimen_type"].lower() == "specimen"
+        if item is None:
+            item = TestCatalogItem(
+                organization_id=context.organization_id,
+                code=code,
+                container_type="Unspecified",
+                price=Decimal("0"),
+            )
+            db.add(item)
+            created += 1
+        else:
+            updated += 1
+            item.parameters.clear()
+        for key in ("name", "service_type", "department", "sub_department", "specimen_type"):
+            setattr(item, key, entry[key])
+        item.is_panel = bool(entry["parameters"])
+        item.validation_status = "needs_review" if needs_review else "validated"
+        if needs_review:
+            review_required += 1
+        seen: set[str] = set()
+        for order, (parameter_name, external_code) in enumerate(entry["parameters"]):
+            if external_code in seen:
+                continue
+            seen.add(external_code)
+            item.parameters.append(
+                TestCatalogParameter(
+                    name=parameter_name, external_code=external_code, display_order=order
+                )
+            )
+            parameter_count += 1
+    summary = TestMasterImportRead(
+        rows_received=row_count,
+        tests_created=created,
+        tests_updated=updated,
+        parameters_imported=parameter_count,
+        rows_rejected=rejected,
+        review_required=review_required,
+        errors=errors,
+    )
+    record_event(
+        db,
+        request,
+        context,
+        event_type="test_master.imported",
+        entity_type="test_master",
+        entity_id=None,
+        action="import",
+        new={**summary.model_dump(), "filename": file.filename},
+    )
+    commit(db)
+    return summary
+
+
 @router.get("/patients/lookup", response_model=PatientLookupRead | None)
 def lookup_patient(
     db: Db,
@@ -686,6 +981,71 @@ def lookup_patient(
     )
 
 
+@router.get("/patients", response_model=Page[PatientLookupRead])
+def list_patients(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+) -> Page[PatientLookupRead]:
+    statement = select(Patient).where(Patient.organization_id == context.organization_id)
+    if search:
+        term = f"%{search.strip().lower()}%"
+        statement = statement.where(
+            or_(
+                func.lower(Patient.patient_number).like(term),
+                func.lower(Patient.full_name).like(term),
+                func.lower(Patient.phone).like(term),
+                func.lower(Patient.email).like(term),
+            )
+        )
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    patients = list(
+        db.scalars(
+            statement.order_by(Patient.updated_at.desc(), Patient.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    items: list[PatientLookupRead] = []
+    for patient in patients:
+        visit_count, last_visit_at = db.execute(
+            select(func.count(LabOrder.id), func.max(LabOrder.created_at)).where(
+                LabOrder.organization_id == context.organization_id,
+                LabOrder.patient_id == patient.id,
+            )
+        ).one()
+        items.append(
+            PatientLookupRead.model_validate(
+                {
+                    **snapshot(
+                        patient,
+                        [
+                            "id",
+                            "patient_number",
+                            "full_name",
+                            "phone",
+                            "email",
+                            "date_of_birth",
+                            "age_years",
+                            "sex",
+                            "address",
+                            "blood_group",
+                            "country",
+                            "race",
+                            "nationality",
+                            "additional_patient_data",
+                        ],
+                    ),
+                    "visit_count": visit_count,
+                    "last_visit_at": last_visit_at,
+                }
+            )
+        )
+    return Page[PatientLookupRead](items=items, total=total, limit=limit, offset=offset)
+
+
 @router.post("/intake-workflows", response_model=IntakeRead, status_code=201)
 def create_intake_workflow(
     payload: IntakeCreate,
@@ -740,7 +1100,10 @@ def create_intake_workflow(
         if len({item.id for item in matches}) > 1:
             raise HTTPException(
                 status_code=409,
-                detail="Phone and email match different patients; search and select the correct patient",
+                detail=(
+                    "Phone and email match different patients; search and select "
+                    "the correct patient"
+                ),
             )
         patient = matches[0] if matches else None
 
@@ -810,7 +1173,7 @@ def create_intake_workflow(
         )
     )
 
-    subtotal = sum((item.price for item in catalog_items), start=Decimal("0"))
+    subtotal = sum((Decimal(str(item.price)) for item in catalog_items), start=Decimal("0"))
     if payload.discount > subtotal:
         raise HTTPException(status_code=422, detail="Discount cannot exceed subtotal")
     for item in catalog_items:
@@ -923,12 +1286,16 @@ def record_payment(
                 .where(OrderTest.order_id == order.id)
             ).all()
         )
-        specimen_groups = sorted(
-            {(item.specimen_type, item.container_type) for item in catalog_items}
-        )
+        specimen_groups: dict[tuple[str, str], set[str]] = {}
+        for item in catalog_items:
+            specimen_groups.setdefault((item.specimen_type, item.container_type), set()).add(
+                item.sub_department or "Unassigned"
+            )
         suffix = order.order_number.rsplit("-", 1)[-1]
         stamp = datetime.now(UTC).strftime("%m%d%H%M%S")
-        for index, (specimen_type, container_type) in enumerate(specimen_groups, start=1):
+        for index, ((specimen_type, container_type), departments) in enumerate(
+            sorted(specimen_groups.items()), start=1
+        ):
             db.add(
                 Specimen(
                     organization_id=context.organization_id,
@@ -937,6 +1304,7 @@ def record_payment(
                     barcode=f"LQ{stamp}{suffix}{index:02d}",
                     specimen_type=specimen_type,
                     container_type=container_type,
+                    laboratory_department=", ".join(sorted(departments)),
                 )
             )
         record_event(
@@ -982,3 +1350,212 @@ def record_payment(
         paid_at=invoice.paid_at,
         specimens=[SpecimenRead.model_validate(item) for item in specimens],
     )
+
+
+def specimen_workflow_read(db: Session, specimen: Specimen) -> SpecimenWorkflowRead:
+    order = db.get(LabOrder, specimen.order_id)
+    patient = db.get(Patient, order.patient_id) if order else None
+    if order is None or patient is None:
+        raise HTTPException(status_code=404, detail="Specimen order was not found")
+    return SpecimenWorkflowRead(
+        **SpecimenRead.model_validate(specimen).model_dump(),
+        id=specimen.id,
+        order_id=order.id,
+        order_number=order.order_number,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        laboratory_department=specimen.laboratory_department,
+        accession_number=specimen.accession_number,
+        collection_location=specimen.collection_location,
+        container_count=specimen.container_count,
+        collection_notes=specimen.collection_notes,
+        collected_at=specimen.collected_at,
+        received_at=specimen.received_at,
+        reviewed_at=specimen.reviewed_at,
+        rejection_reason=specimen.rejection_reason,
+        rejection_notes=specimen.rejection_notes,
+    )
+
+
+def get_specimen_by_barcode(db: Session, barcode: str, context: AuthContext) -> Specimen:
+    specimen = db.scalar(
+        select(Specimen).where(
+            Specimen.organization_id == context.organization_id,
+            Specimen.barcode == barcode.strip(),
+        )
+    )
+    if specimen is None:
+        raise HTTPException(status_code=404, detail="Specimen barcode not found")
+    if not context.can_access_branch(specimen.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    return specimen
+
+
+@router.get("/specimens", response_model=Page[SpecimenWorkflowRead])
+def list_specimens(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    specimen_status: Annotated[str | None, Query(alias="status")] = None,
+    department: Annotated[str | None, Query(max_length=120)] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+) -> Page[SpecimenWorkflowRead]:
+    statement = (
+        select(Specimen)
+        .join(LabOrder, LabOrder.id == Specimen.order_id)
+        .join(Patient, Patient.id == LabOrder.patient_id)
+        .where(Specimen.organization_id == context.organization_id)
+    )
+    if not context.is_organization_scoped:
+        statement = statement.where(Specimen.branch_id.in_(context.branch_ids))
+    if specimen_status:
+        statement = statement.where(Specimen.status == specimen_status)
+    if department:
+        statement = statement.where(Specimen.laboratory_department == department)
+    if search:
+        term = f"%{search.strip().lower()}%"
+        statement = statement.where(
+            or_(
+                func.lower(Specimen.barcode).like(term),
+                func.lower(Specimen.accession_number).like(term),
+                func.lower(LabOrder.order_number).like(term),
+                func.lower(Patient.patient_number).like(term),
+                func.lower(Patient.full_name).like(term),
+            )
+        )
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    records = list(
+        db.scalars(
+            statement.order_by(Specimen.updated_at.desc(), Specimen.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    return Page[SpecimenWorkflowRead](
+        items=[specimen_workflow_read(db, item) for item in records],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/specimens/{barcode}", response_model=SpecimenWorkflowRead)
+def get_specimen(
+    barcode: str,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
+) -> SpecimenWorkflowRead:
+    return specimen_workflow_read(db, get_specimen_by_barcode(db, barcode, context))
+
+
+@router.post("/specimens/{barcode}/collect", response_model=SpecimenWorkflowRead)
+def collect_specimen(
+    barcode: str,
+    payload: SpecimenCollect,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.manage"))],
+) -> SpecimenWorkflowRead:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    if specimen.status != "awaiting_collection":
+        raise HTTPException(status_code=409, detail="Only awaiting specimens can be collected")
+    specimen.status = "collected"
+    specimen.collection_location = payload.collection_location.strip()
+    specimen.container_count = payload.container_count
+    specimen.collection_notes = payload.collection_notes
+    specimen.collected_by = context.user_id
+    specimen.collected_at = datetime.now(UTC)
+    order = db.get(LabOrder, specimen.order_id)
+    if order:
+        order.status = "collection_in_progress"
+    record_event(
+        db,
+        request,
+        context,
+        event_type="specimen.collected",
+        entity_type="specimen",
+        entity_id=specimen.id,
+        branch_id=specimen.branch_id,
+        action="collect",
+        previous={"status": "awaiting_collection"},
+        new={"status": "collected", **payload.model_dump()},
+    )
+    commit(db)
+    return specimen_workflow_read(db, specimen)
+
+
+@router.post("/specimens/{barcode}/receive", response_model=SpecimenWorkflowRead)
+def receive_specimen(
+    barcode: str,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.manage"))],
+) -> SpecimenWorkflowRead:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    if specimen.status != "collected":
+        raise HTTPException(status_code=409, detail="Only collected specimens can be received")
+    specimen.status = "received"
+    specimen.received_by = context.user_id
+    specimen.received_at = datetime.now(UTC)
+    specimen.accession_number = f"ACC-{datetime.now(UTC):%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
+    order = db.get(LabOrder, specimen.order_id)
+    if order:
+        order.status = "laboratory_received"
+    record_event(
+        db,
+        request,
+        context,
+        event_type="specimen.received",
+        entity_type="specimen",
+        entity_id=specimen.id,
+        branch_id=specimen.branch_id,
+        action="receive",
+        previous={"status": "collected"},
+        new={"status": "received", "accession_number": specimen.accession_number},
+    )
+    commit(db)
+    return specimen_workflow_read(db, specimen)
+
+
+@router.post("/specimens/{barcode}/decision", response_model=SpecimenWorkflowRead)
+def review_specimen(
+    barcode: str,
+    payload: SpecimenDecision,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("branch.manage"))],
+) -> SpecimenWorkflowRead:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    if specimen.status != "received":
+        raise HTTPException(status_code=409, detail="Only received specimens can be reviewed")
+    if payload.decision == "reject" and not payload.rejection_reason:
+        raise HTTPException(status_code=422, detail="A rejection reason is required")
+    specimen.status = "accepted" if payload.decision == "accept" else "rejected"
+    specimen.reviewed_by = context.user_id
+    specimen.reviewed_at = datetime.now(UTC)
+    specimen.rejection_reason = payload.rejection_reason if payload.decision == "reject" else None
+    specimen.rejection_notes = payload.notes
+    order = db.get(LabOrder, specimen.order_id)
+    if order:
+        statuses = set(
+            db.scalars(select(Specimen.status).where(Specimen.order_id == order.id)).all()
+        )
+        if "rejected" in statuses:
+            order.status = "recollection_required"
+        elif statuses == {"accepted"}:
+            order.status = "ready_for_processing"
+    record_event(
+        db,
+        request,
+        context,
+        event_type=f"specimen.{specimen.status}",
+        entity_type="specimen",
+        entity_id=specimen.id,
+        branch_id=specimen.branch_id,
+        action=payload.decision,
+        previous={"status": "received"},
+        new={"status": specimen.status, **payload.model_dump()},
+    )
+    commit(db)
+    return specimen_workflow_read(db, specimen)

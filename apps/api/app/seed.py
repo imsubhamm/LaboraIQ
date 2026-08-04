@@ -26,6 +26,10 @@ PERMISSIONS = {
     "audit.read": "View audit events",
     "validation.read": "View validation evidence",
     "validation.manage": "Manage validation evidence",
+    "test_master.read": "View the LIS/HIS test master",
+    "test_master.manage": "Manage and import the LIS/HIS test master",
+    "analyzer.read": "View analyzer configurations",
+    "analyzer.manage": "Manage analyzer configurations",
 }
 
 ROLE_TEMPLATES = {
@@ -77,6 +81,11 @@ def seed() -> None:
                     permissions=[permissions[code] for code in codes],
                 )
                 db.add(role)
+            else:
+                assigned_codes = {permission.code for permission in role.permissions}
+                role.permissions.extend(
+                    permissions[code] for code in codes if code not in assigned_codes
+                )
             roles[name] = role
         db.flush()
 

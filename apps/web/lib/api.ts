@@ -11,10 +11,11 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(!isFormData ? { "Content-Type": "application/json" } : {}),
       "X-Dev-User-Email": "admin@dev.labora.local",
       ...init?.headers
     },

@@ -106,10 +106,14 @@ export default function NewPatientPage() {
       .catch(err => setError(err instanceof Error ? err.message : "Unable to load test catalogue"));
   }, []);
 
-  const filteredTests = useMemo(
-    () => catalog.filter(test => test.name.toLowerCase().includes(testQuery.toLowerCase())),
-    [catalog, testQuery]
-  );
+  const matchingTests = useMemo(() => {
+    const query = testQuery.trim().toLowerCase();
+    if (!query) return catalog;
+    return catalog.filter(test =>
+      test.name.toLowerCase().includes(query) || test.code.toLowerCase().includes(query)
+    );
+  }, [catalog, testQuery]);
+  const visibleTests = matchingTests.slice(0, testQuery.trim() ? 50 : 20);
 
   function update(field: keyof IntakeForm, value: string) {
     setForm(current => ({ ...current, [field]: value }));
@@ -216,10 +220,14 @@ export default function NewPatientPage() {
   }
 
   const complete = Boolean(
-    form.phone && form.email && form.bloodGroup && form.country && form.nationality &&
+    form.fullName && form.ageYears && form.sex && form.phone && form.email &&
+    form.bloodGroup && form.country && form.nationality &&
     form.visitType && form.department && form.doctorName && tests.length
   );
   const missingFields = [
+    !form.fullName && "patient name",
+    !form.ageYears && "age",
+    !form.sex && "sex",
     !form.phone && "phone number",
     !form.email && "email address",
     !form.bloodGroup && "blood group",
@@ -260,7 +268,7 @@ export default function NewPatientPage() {
           <article className="panel form-section">
             <div className="form-section-head">
               <span><UserRound size={19}/></span>
-              <div><p className="eyebrow">SECTION 01</p><h2>Patient details</h2><small>Fields marked with * are required.</small></div>
+              <div><p className="eyebrow">SECTION 01 · REQUIRED</p><h2>Required information</h2><small>Complete every field marked with * before entering optional details.</small></div>
             </div>
             <div className="form-grid">
               <label className="wide">Find returning patient
@@ -271,22 +279,17 @@ export default function NewPatientPage() {
                 {patientMatch && <small className="patient-match"><Check size={12}/> Existing patient {patientMatch.patient_number} · UUID {patientMatch.id} · {patientMatch.visit_count} previous visit(s). Details loaded and editable.</small>}
               </label>
               <label className="wide">Patient ID (UUID)<input readOnly value={form.patientId || "Generated automatically when saved"} aria-label="Patient ID"/></label>
+              <label>Patient name *<input required autoComplete="name" placeholder="Full patient name" value={form.fullName} onChange={e => update("fullName", e.target.value)}/></label>
+              <label>Age *<input required type="number" min="0" max="130" inputMode="numeric" placeholder="Age in years" value={form.ageYears} onChange={e => update("ageYears", e.target.value)}/></label>
+              <label>Sex *<select required value={form.sex} onChange={e => update("sex", e.target.value)}><option value="">Select sex</option><option>Female</option><option>Male</option><option>Intersex</option><option>Other</option><option>Unknown</option></select></label>
+              <label>Patient type *<select required value={form.visitType} onChange={e => update("visitType", e.target.value)}><option value="">Select IP / OP</option><option value="OP">OP — Outpatient</option><option value="IP">IP — Inpatient</option></select></label>
+              <label>Consulting department *<input required placeholder="Department" value={form.department} onChange={e => update("department", e.target.value)}/></label>
+              <label>Consultant name *<div className="input-with-icon"><Stethoscope size={16}/><input required placeholder="Dr. full name" value={form.doctorName} onChange={e => update("doctorName", e.target.value)}/></div></label>
               <label>Phone number *<div className="input-with-icon"><Phone size={16}/><input required type="tel" autoComplete="tel" inputMode="tel" placeholder="+91 98765 43210" value={form.phone} onChange={e => update("phone", e.target.value)}/></div></label>
               <label>Email address *<div className="input-with-icon"><Mail size={16}/><input required type="email" autoComplete="email" placeholder="patient@example.com" value={form.email} onChange={e => update("email", e.target.value)}/></div></label>
               <label>Blood group *<select required value={form.bloodGroup} onChange={e => update("bloodGroup", e.target.value)}><option value="">Select blood group</option>{bloodGroups.map(group => <option key={group}>{group}</option>)}</select><small className="field-hint">Choose Unknown when it has not been confirmed.</small></label>
               <label>Country *<input required autoComplete="country-name" placeholder="Country" value={form.country} onChange={e => update("country", e.target.value)}/></label>
               <label>Nationality *<input required placeholder="Nationality" value={form.nationality} onChange={e => update("nationality", e.target.value)}/></label>
-              <div className="wide optional-intro"><div><strong>Prescription patient data</strong><small>Optional — enter these details only when they appear on the prescription.</small></div><button type="button" onClick={() => setShowOptional(value => !value)}>{showOptional ? "Show less" : "Load more"}<ChevronRight size={14}/></button></div>
-              {showOptional && <div className="wide optional-fields">
-                <label>Patient Name<input autoComplete="name" placeholder="From prescription" value={form.fullName} onChange={e => update("fullName", e.target.value)}/></label>
-                <label>Patient Age<input type="number" min="0" max="130" inputMode="numeric" placeholder="From prescription" value={form.ageYears} onChange={e => update("ageYears", e.target.value)}/></label>
-                <label>Sex<select value={form.sex} onChange={e => update("sex", e.target.value)}><option value="">Not provided</option><option>Female</option><option>Male</option><option>Intersex</option><option>Other</option><option>Unknown</option></select></label>
-                <label>Race<input placeholder="From prescription" value={form.race} onChange={e => update("race", e.target.value)}/></label>
-                <label>Location - Ward<input placeholder="From prescription" value={form.ward} onChange={e => update("ward", e.target.value)}/></label>
-                <label>Diagnosis - Code / Text<input placeholder="From prescription" value={form.diagnosis} onChange={e => update("diagnosis", e.target.value)}/></label>
-                <label className="wide">Address<textarea rows={2} autoComplete="street-address" placeholder="From prescription" value={form.address} onChange={e => update("address", e.target.value)}/></label>
-                {additionalPatientFields.map(field => <label key={field}>{field}<input value={additionalData[field] ?? ""} placeholder="From prescription" onChange={e => setAdditionalData(current => ({ ...current, [field]: e.target.value }))}/></label>)}
-              </div>}
             </div>
           </article>
 
@@ -296,23 +299,31 @@ export default function NewPatientPage() {
               <div><p className="eyebrow">SECTION 02</p><h2>Requested tests</h2><small>Select one or more tests from the current catalogue.</small></div>
             </div>
             <div className="test-picker">
-              <input aria-label="Find a test" placeholder="Search test catalogue…" value={testQuery} onChange={e => setTestQuery(e.target.value)}/>
-              <div className="test-options">
-                {filteredTests.map(test => <label key={test.id} className={tests.includes(test.id) ? "selected" : ""}><input type="checkbox" checked={tests.includes(test.id)} onChange={() => toggleTest(test.id)}/><span className="check-box"><Check size={13}/></span><span className="test-copy">{test.name}<small>{test.specimen_type} · ₹{test.price}</small></span></label>)}
-              </div>
+              <input aria-label="Find a test" placeholder="Search test name or code…" value={testQuery} onChange={e => setTestQuery(e.target.value)}/>
               {tests.length > 0 && <div className="selected-tests"><strong>{tests.length} selected</strong>{tests.map(testId => { const test = catalog.find(item => item.id === testId); return <button type="button" key={testId} onClick={() => toggleTest(testId)}>{test?.name ?? testId}<X size={12}/></button>; })}</div>}
+              <div className="test-result-status"><span>{testQuery.trim() ? `${matchingTests.length} matching tests` : `Showing 20 of ${catalog.length} tests`}</span>{!testQuery.trim() && <small>Search to find the complete catalogue.</small>}</div>
+              <div className="test-options">
+                {visibleTests.map(test => <button type="button" key={test.id} className={`test-option ${tests.includes(test.id) ? "selected" : ""}`} aria-pressed={tests.includes(test.id)} onClick={() => toggleTest(test.id)}><span className="check-box"><Check size={13}/></span><span className="test-copy">{test.name}<small>{test.code} · {test.specimen_type} · ₹{test.price}</small></span></button>)}
+              </div>
+              {visibleTests.length === 0 && <div className="test-empty">No tests match “{testQuery}”.</div>}
+              {matchingTests.length > visibleTests.length && <div className="test-more-hint">Showing the first {visibleTests.length} results. Refine the search to narrow the list.</div>}
             </div>
           </article>
 
           <article className="panel form-section">
             <div className="form-section-head">
               <span><Stethoscope size={19}/></span>
-              <div><p className="eyebrow">SECTION 03</p><h2>Visit & prescription</h2><small>Record the visit and attach the prescription.</small></div>
+              <div><p className="eyebrow">SECTION 03 · OPTIONAL</p><h2>Additional details & prescription</h2><small>Add supporting information only when it is available.</small></div>
             </div>
             <div className="form-grid">
-              <label>Patient type *<select required value={form.visitType} onChange={e => update("visitType", e.target.value)}><option value="">Select IP / OP</option><option value="OP">OP — Outpatient</option><option value="IP">IP — Inpatient</option></select></label>
-              <label>Consulting department *<input required placeholder="Department" value={form.department} onChange={e => update("department", e.target.value)}/></label>
-              <label>Consultant name *<div className="input-with-icon"><Stethoscope size={16}/><input required placeholder="Dr. full name" value={form.doctorName} onChange={e => update("doctorName", e.target.value)}/></div></label>
+              <label>Race<input placeholder="Optional" value={form.race} onChange={e => update("race", e.target.value)}/></label>
+              <label>Location - Ward<input placeholder="Optional" value={form.ward} onChange={e => update("ward", e.target.value)}/></label>
+              <label className="wide">Diagnosis - Code / Text<input placeholder="Optional diagnosis" value={form.diagnosis} onChange={e => update("diagnosis", e.target.value)}/></label>
+              <label className="wide">Address<textarea rows={2} autoComplete="street-address" placeholder="Optional address" value={form.address} onChange={e => update("address", e.target.value)}/></label>
+              <div className="wide optional-intro"><div><strong>Extended prescription data</strong><small>Load additional administrative fields only when needed.</small></div><button type="button" onClick={() => setShowOptional(value => !value)}>{showOptional ? "Show less" : "Load more"}<ChevronRight size={14}/></button></div>
+              {showOptional && <div className="wide optional-fields">
+                {additionalPatientFields.map(field => <label key={field}>{field}<input value={additionalData[field] ?? ""} placeholder="From prescription" onChange={e => setAdditionalData(current => ({ ...current, [field]: e.target.value }))}/></label>)}
+              </div>}
               <label className="wide">Prescription document
                 <div className={`upload-zone ${prescription ? "has-file" : ""}`}>
                   <input aria-label="Upload prescription" type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={choosePrescription}/>
@@ -329,7 +340,7 @@ export default function NewPatientPage() {
           <div className="panel summary-card">
             <p className="eyebrow">ENTRY SUMMARY</p>
             <h2>Review readiness</h2>
-            <div className={form.phone && form.email && form.bloodGroup && form.country && form.nationality ? "done" : ""}><span>{form.phone && form.email && form.bloodGroup && form.country && form.nationality ? <Check size={14}/> : "1"}</span><p><strong>Patient details</strong><small>{patientMatch ? `${patientMatch.patient_number} · returning` : form.fullName || "New patient"}</small></p></div>
+            <div className={form.fullName && form.ageYears && form.sex && form.phone && form.email && form.bloodGroup && form.country && form.nationality ? "done" : ""}><span>{form.fullName && form.ageYears && form.sex && form.phone && form.email && form.bloodGroup && form.country && form.nationality ? <Check size={14}/> : "1"}</span><p><strong>Patient details</strong><small>{patientMatch ? `${patientMatch.patient_number} · returning` : form.fullName || "New patient"}</small></p></div>
             <div className={tests.length ? "done" : ""}><span>{tests.length ? <Check size={14}/> : "2"}</span><p><strong>Requested tests</strong><small>{tests.length ? `${tests.length} selected` : "None selected"}</small></p></div>
             <div className={form.visitType && form.department && form.doctorName ? "done" : ""}><span>{form.visitType && form.department && form.doctorName ? <Check size={14}/> : "3"}</span><p><strong>Visit details</strong><small>{form.visitType ? `${form.visitType} · ${form.department || "department pending"}` : "Not entered"}</small></p></div>
             <button className="primary review-button" type="submit">Review patient entry<ChevronRight size={16}/></button>

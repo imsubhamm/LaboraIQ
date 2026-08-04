@@ -1,4 +1,5 @@
 import uuid
+from io import BytesIO
 
 import pytest
 from app.auth import AuthContext, get_auth_context
@@ -13,10 +14,12 @@ from app.models import (
     PatientHistory,
     Permission,
     Role,
+    Specimen,
     TestCatalogItem,
     User,
 )
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -186,6 +189,81 @@ def test_validation_error(client: TestClient) -> None:
     assert client.post("/api/v1/branches", json={"name": "x", "code": "bad"}).status_code == 422
 
 
+def test_test_master_import_groups_panel_parameters_and_flags_placeholder_specimen(
+    client: TestClient, db: Session
+) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        [
+            "Service Type",
+            "Department",
+            "Sub Department",
+            "Service Code",
+            "Service Name",
+            "SPECIMEN",
+            "PARAMETER CODE",
+            "PARAMETER DESCRIPTION",
+        ]
+    )
+    sheet.append(
+        [
+            "Pathology",
+            "Laboratory",
+            "Biochemistry",
+            "BIO0077",
+            "LIPID PROFILE",
+            "Serum",
+            "HDL",
+            "hdl_external",
+        ]
+    )
+    sheet.append(
+        [
+            "Pathology",
+            "Laboratory",
+            "Biochemistry",
+            "BIO0077",
+            "LIPID PROFILE",
+            "Serum",
+            "LDL",
+            "ldl_external",
+        ]
+    )
+    sheet.append(
+        ["Pathology", "Laboratory", "Microbiology", "MIC001", "CULTURE", "specimen", "", ""]
+    )
+    sheet.append(["Pathology", "Laboratory", "Biochemistry", "", "MISSING CODE", "Serum", "", ""])
+    content = BytesIO()
+    workbook.save(content)
+
+    response = client.post(
+        "/api/v1/test-master/import",
+        files={
+            "file": (
+                "test-master.xlsx",
+                content.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert response.status_code == 200
+    assert len(response.json()["errors"]) == 1
+    assert response.json()["tests_created"] == 2
+    assert response.json()["parameters_imported"] == 2
+    assert response.json()["rows_rejected"] == 1
+    assert response.json()["review_required"] == 1
+
+    listing = client.get("/api/v1/test-master", params={"search": "BIO0077"})
+    assert listing.status_code == 200
+    item = listing.json()["items"][0]
+    assert item["is_panel"] is True
+    assert [parameter["name"] for parameter in item["parameters"]] == ["HDL", "LDL"]
+    review = client.get("/api/v1/test-master", params={"review_only": "true"}).json()
+    assert review["total"] == 1
+    assert review["items"][0]["code"] == "MIC001"
+
+
 def test_environment_origin_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CORS_ORIGINS", "https://admin.example.com,http://localhost:3000")
     assert Settings().cors_origins == ["https://admin.example.com", "http://localhost:3000"]
@@ -194,9 +272,7 @@ def test_environment_origin_validation(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_returning_patient_is_updated_and_history_is_appended(
     client: TestClient, db: Session, context: AuthContext
 ) -> None:
-    branch = Branch(
-        organization_id=context.organization_id, name="Central", code="CENTRAL"
-    )
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
     test = TestCatalogItem(
         organization_id=context.organization_id,
         code="CBC",
@@ -249,3 +325,65 @@ def test_returning_patient_is_updated_and_history_is_appended(
     assert db.query(LabOrder).count() == 2
     assert db.query(PatientHistory).count() == 2
     assert db.get(Patient, uuid.UUID(patient_id)).full_name == "Returning Patient Corrected"
+
+    directory = client.get("/api/v1/patients")
+    assert directory.status_code == 200
+    assert directory.json()["total"] == 1
+    assert directory.json()["items"][0]["patient_number"].startswith("PT-")
+    assert directory.json()["items"][0]["visit_count"] == 2
+
+    payment = client.post(
+        f"/api/v1/orders/{second.json()['order_id']}/payment",
+        json={"payment_method": "CASH"},
+    )
+    assert payment.status_code == 200
+    barcode = payment.json()["specimens"][0]["barcode"]
+    worklist = client.get("/api/v1/specimens")
+    assert worklist.status_code == 200
+    assert worklist.json()["items"][0]["status"] == "awaiting_collection"
+
+    collected = client.post(
+        f"/api/v1/specimens/{barcode}/collect",
+        json={"collection_location": "OP Collection", "container_count": 1},
+    )
+    assert collected.status_code == 200
+    assert collected.json()["status"] == "collected"
+    received = client.post(f"/api/v1/specimens/{barcode}/receive")
+    assert received.status_code == 200
+    assert received.json()["status"] == "received"
+    assert received.json()["accession_number"].startswith("ACC-")
+    accepted = client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"})
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "accepted"
+    assert db.scalar(select(Specimen).where(Specimen.barcode == barcode)).reviewed_at is not None
+
+
+def test_analyzer_configuration_is_branch_scoped_validated_and_audited(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    db.add(branch)
+    db.commit()
+    payload = {
+        "branch_id": str(branch.id),
+        "code": "HEM-01",
+        "vendor": "Sysmex",
+        "model": "XN-1000",
+        "protocol": "ASTM",
+        "host": "192.168.10.50",
+        "port": 5000,
+        "connection_mode": "bidirectional",
+    }
+    created = client.post("/api/v1/analyzers", json=payload)
+    assert created.status_code == 201
+    assert created.json()["host"] == "192.168.10.50"
+    listing = client.get("/api/v1/analyzers")
+    assert listing.status_code == 200
+    assert listing.json()["total"] == 1
+    analyzer_id = created.json()["id"]
+    updated = client.patch(f"/api/v1/analyzers/{analyzer_id}", json={"port": 5001})
+    assert updated.status_code == 200
+    assert updated.json()["port"] == 5001
+    assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "analyzer.created"))
+    invalid = {**payload, "code": "HEM-02", "host": "not-an-ip"}
+    assert client.post("/api/v1/analyzers", json=invalid).status_code == 422

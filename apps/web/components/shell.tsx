@@ -4,16 +4,20 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity, Building2, GitBranch, LayoutDashboard, LogOut, Settings,
-  ShieldCheck, Users, ScrollText, FlaskConical, ClipboardPlus
+  ShieldCheck, Users, ScrollText, FlaskConical, ClipboardPlus, TestTubes, ContactRound, ScanBarcode, Cpu
 } from "lucide-react";
 import { can, Permission } from "@/lib/auth";
 
 const navigation: Array<[string, string, React.ComponentType<{size?: number}>, Permission?]> = [
   ["/dashboard", "Overview", LayoutDashboard, undefined],
   ["/patients/new", "Patient intake", ClipboardPlus, "branch.manage"],
+  ["/patients", "Patients", ContactRound, "branch.read"],
+  ["/specimens", "Specimens", ScanBarcode, "branch.read"],
+  ["/analyzers", "Analyzers", Cpu, "analyzer.read"],
   ["/organizations", "Organizations", Building2, "organization.read"],
   ["/branches", "Branches", GitBranch, "branch.read"],
   ["/departments", "Departments", FlaskConical, "branch.read"],
+  ["/test-master", "Test master", TestTubes, "test_master.read"],
   ["/users", "Users", Users, "user.read"],
   ["/roles", "Roles & access", ShieldCheck, "role.read"],
   ["/audit", "Audit trail", ScrollText, "audit.read"],
