@@ -16,16 +16,25 @@ type WorklistItem = {
   analyzer_name: string;
   machine_test_code: string;
   status: string;
+  latest_attempt_no: number | null;
+  latest_attempt_state: string | null;
   created_at: string;
+};
+
+type ProcessResult = {
+  processed: number;
+  attempts: Array<{ id: string; attempt_no: number; state: string; error: string | null }>;
 };
 
 export default function AnalyzerWorklistPage() {
   const [items, setItems] = useState<WorklistItem[]>([]);
   const [total, setTotal] = useState(0);
-  const [status, setStatus] = useState("pending");
+  const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState("");
+  const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
+  const [processSummary, setProcessSummary] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -77,6 +86,29 @@ export default function AnalyzerWorklistPage() {
     }
   }
 
+  async function processQueue() {
+    try {
+      setProcessing(true);
+      setError("");
+      const result = await api<ProcessResult>("/analyzer-orders/process?limit=20", {
+        method: "POST",
+        body: "{}",
+      });
+      setProcessSummary(
+        result.processed === 0
+          ? "No queued order attempts to process."
+          : `Processed ${result.processed} attempt(s): ${result.attempts
+              .map((item) => `#${item.attempt_no} ${item.state}`)
+              .join(", ")}`
+      );
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to process order queue");
+    } finally {
+      setProcessing(false);
+    }
+  }
+
   return (
     <section>
       <div className="page-heading">
@@ -85,7 +117,21 @@ export default function AnalyzerWorklistPage() {
           <h1>Analyzer worklist</h1>
           <p>Accepted specimens routed to analyzers by active LIS ↔ machine mappings.</p>
         </div>
+        {can("analyzer.manage") && (
+          <button className="primary" disabled={processing} onClick={() => void processQueue()}>
+            {processing ? "Processing…" : "Process order queue"}
+          </button>
+        )}
       </div>
+      {processSummary && (
+        <div className="import-summary panel">
+          <ListChecks size={22} />
+          <div>
+            <strong>Order queue</strong>
+            <p>{processSummary}</p>
+          </div>
+        </div>
+      )}
       {error && (
         <div className="error-state">
           <AlertCircle size={18} />
@@ -105,6 +151,7 @@ export default function AnalyzerWorklistPage() {
               <option value="">All statuses</option>
               <option value="pending">Pending</option>
               <option value="queued">Queued</option>
+              <option value="in_flight">In flight</option>
               <option value="failed">Failed</option>
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>
@@ -135,6 +182,7 @@ export default function AnalyzerWorklistPage() {
                   <th>Analyzer</th>
                   <th>Machine code</th>
                   <th>Status</th>
+                  <th>Attempt</th>
                   <th>Created</th>
                   <th>Actions</th>
                 </tr>
@@ -160,6 +208,16 @@ export default function AnalyzerWorklistPage() {
                     </td>
                     <td>
                       <span className={`status ${item.status}`}>{item.status}</span>
+                    </td>
+                    <td>
+                      {item.latest_attempt_no != null ? (
+                        <>
+                          <strong>#{item.latest_attempt_no}</strong>
+                          <span>{item.latest_attempt_state}</span>
+                        </>
+                      ) : (
+                        <span>None</span>
+                      )}
                     </td>
                     <td>{new Date(item.created_at).toLocaleString()}</td>
                     <td>

@@ -348,6 +348,53 @@ class AnalyzerWorklistItem(Base, TimestampMixin):
     updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
+class AnalyzerMessage(Base):
+    __tablename__ = "analyzer_messages"
+    __table_args__ = (
+        Index("ix_analyzer_messages_correlation", "organization_id", "correlation_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    analyzer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analyzers.id"), index=True)
+    worklist_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("analyzer_worklist_items.id"), index=True
+    )
+    attempt_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    direction: Mapped[str] = mapped_column(String(20))  # outbound | inbound
+    content_type: Mapped[str] = mapped_column(String(80), default="text/plain")
+    body: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    correlation_id: Mapped[str] = mapped_column(String(100), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AnalyzerOrderAttempt(Base, TimestampMixin):
+    __tablename__ = "analyzer_order_attempts"
+    __table_args__ = (
+        Index("ix_order_attempts_queue", "organization_id", "state", "created_at"),
+        UniqueConstraint("worklist_item_id", "attempt_no", name="uq_worklist_attempt_no"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    worklist_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analyzer_worklist_items.id"), index=True
+    )
+    analyzer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analyzers.id"), index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    correlation_id: Mapped[str] = mapped_column(String(100), index=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(64))
+    request_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("analyzer_messages.id"))
+    response_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("analyzer_messages.id")
+    )
+    error: Mapped[str | None] = mapped_column(String(500))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
 class LabOrder(Base, TimestampMixin):
     __tablename__ = "lab_orders"
     __table_args__ = (UniqueConstraint("organization_id", "order_number", name="uq_order_number"),)

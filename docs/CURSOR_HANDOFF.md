@@ -8,7 +8,7 @@ LaboraIQ is a multi-tenant laboratory information system covering patient intake
 
 ## Repository layout
 
-- `apps/api`: FastAPI, SQLAlchemy, Alembic, SQLite in the current production environment.
+- `apps/api`: FastAPI, SQLAlchemy, Alembic; Neon PostgreSQL in local/prod, SQLite for tests/CI.
 - `apps/web`: Next.js 16, React 19, TypeScript.
 - `infrastructure`: AWS and deployment infrastructure.
 - `tools/analyzer_tcp_simulator.py`: minimal TCP listener used for Mac-to-EC2 connectivity UAT.
@@ -79,7 +79,15 @@ Do not commit SSH keys, Tailscale auth keys, passwords, cookies, tokens, or `.en
 - Accepting a specimen creates pending worklist items for ordered tests with active mappings on active branch analyzers.
 - List/filter worklist, enqueue to `queued`, and cancel items.
 - UI available at `/analyzers/worklist`.
-- Order transmission / HL7 ACK is not implemented yet (Phase 2–3).
+
+### Analyzer order queue (Phase 2)
+
+- Enqueue creates an `AnalyzerOrderAttempt` in `queued` and advances the worklist item.
+- `POST /analyzer-orders/process` drains queued attempts: `queued` → `sending` → `acknowledged` or retry/`failed`.
+- Outbound payload is the stub `LABORAIQ-ORDER-V0` frame over TCP (not HL7 yet). Retries respect analyzer `retry_limit`.
+- Immutable `AnalyzerMessage` rows store request (and optional response) payloads with correlation id and payload hash.
+- Cancel fails open attempts. Worklist UI shows latest attempt state and a Process order queue action.
+- HL7 LAW framing, ACK parsing, and result ingestion remain Phase 3+.
 
 ## Current UAT state
 
@@ -101,7 +109,7 @@ There is also an incorrect UAT mapping of `BIO0231 -> A4` on the Sysmex XN-1000 
 
 1. The TCP simulator only accepts and closes connections. It does not parse or acknowledge analyzer messages.
 2. `Connected` currently means TCP reachability only, not successful HL7/ASTM application-level communication.
-3. Worklist items can be queued, but there is no analyzer order transmission worker yet.
+3. Order queue sends a stub TCP payload; “acknowledged” means the remote accepted the TCP write, not an HL7 ACK.
 4. There is no HL7/ASTM message framing, ACK/NAK handling, or result ingestion.
 5. There is no result model, technical validation, pathologist validation, report release, or result PDF.
 6. BIO0231 now has an Androstenedione parameter (`ANDRO`, unit `ng/mL`); reference limits remain pending clinical approval.
@@ -116,11 +124,11 @@ Build the analytical workflow in this order:
 1. ~~Add analyzer mapping delete/deactivate support.~~
 2. ~~Add test parameter editing, units, reference ranges, and critical thresholds.~~
 3. ~~Create an analyzer worklist for accepted specimens whose requested tests have active mappings.~~
-4. Add an analyzer order state machine / sender: `queued` → `sending` → `acknowledged` / `failed` / `completed`.
-5. Add persistent order attempts, correlation IDs, payload hashes, retry scheduling, and audit events.
+4. ~~Add an analyzer order state machine / sender: `queued` → `sending` → `acknowledged` / `failed`.~~
+5. ~~Add persistent order attempts, correlation IDs, payload hashes, retries, and immutable message store.~~
 6. Implement a real UAT protocol. Prefer HL7 v2.5.1/IHE LAW for the simulator unless a target analyzer manual requires ASTM.
 7. Upgrade the Mac simulator to receive an order, validate barcode/test code, send ACK, and return a test result.
-8. Store raw inbound/outbound messages separately from normalized results.
+8. Store raw inbound/outbound messages separately from normalized results (request store exists; inbound/result path next).
 9. Add result normalization by analyzer mapping, including units and flags.
 10. Add technical review, pathologist validation, report release, and PDF output.
 
@@ -164,14 +172,18 @@ npm run build
 ## Key implementation files
 
 - `apps/api/app/api.py`: API endpoints and workflow logic.
+- `apps/api/app/analyzer_orders.py`: order queue sender, retries, stub TCP payload.
 - `apps/api/app/models.py`: SQLAlchemy data model.
 - `apps/api/app/schemas.py`: request/response contracts.
 - `apps/api/migrations/versions/20260805_0008_analyzer_test_mapping.py`
 - `apps/api/migrations/versions/20260805_0009_analyzer_connection_monitoring.py`
+- `apps/api/migrations/versions/20260805_0010_analyzer_worklist_and_cleanup.py`
+- `apps/api/migrations/versions/20260805_0011_analyzer_order_queue.py`
 - `apps/web/app/(protected)/patients/new/page.tsx`
 - `apps/web/app/(protected)/payments/[orderId]/page.tsx`
 - `apps/web/app/(protected)/specimens/page.tsx`
 - `apps/web/app/(protected)/analyzers/page.tsx`
+- `apps/web/app/(protected)/analyzers/worklist/page.tsx`
 - `apps/web/components/specimen-barcode.tsx`
 - `tools/analyzer_tcp_simulator.py`
 

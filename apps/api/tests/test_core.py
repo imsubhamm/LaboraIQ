@@ -749,3 +749,199 @@ def test_accepting_specimen_creates_analyzer_worklist_item(
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
+
+
+def test_order_queue_sends_stub_payload_retries_then_fails(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add_all([branch, test])
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "MAC-UAT-01",
+            "vendor": "LaboraIQ",
+            "model": "Mac Simulator",
+            "protocol": "HL7_LAW",
+            "host": "192.168.10.80",
+            "port": 55001,
+            "connection_mode": "bidirectional",
+            "retry_limit": 1,
+        },
+    ).json()
+    assert (
+        client.post(
+            f"/api/v1/analyzers/{analyzer['id']}/mappings",
+            json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+        ).status_code
+        == 201
+    )
+    intake = client.post(
+        "/api/v1/intake-workflows",
+        json={
+            "full_name": "Queue Patient",
+            "phone": "+919811122244",
+            "email": "queue@example.com",
+            "age_years": 30,
+            "sex": "Female",
+            "blood_group": "A+",
+            "country": "India",
+            "race": "Asian",
+            "nationality": "Indian",
+            "visit_type": "OP",
+            "department": "Medicine",
+            "ward": "OP Clinic",
+            "doctor_name": "Dr Example",
+            "diagnosis": "Z00.0",
+            "test_ids": [str(test.id)],
+        },
+    )
+    assert intake.status_code == 201
+    payment = client.post(
+        f"/api/v1/orders/{intake.json()['order_id']}/payment",
+        json={"payment_method": "CASH"},
+    )
+    barcode = payment.json()["specimens"][0]["barcode"]
+    assert (
+        client.post(
+            f"/api/v1/specimens/{barcode}/collect",
+            json={"collection_location": "OP", "container_count": 1},
+        ).status_code
+        == 200
+    )
+    assert client.post(f"/api/v1/specimens/{barcode}/receive").status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"}
+        ).status_code
+        == 200
+    )
+    worklist = client.get("/api/v1/analyzer-worklist", params={"status": "pending"}).json()
+    item_id = worklist["items"][0]["id"]
+    assert client.post(f"/api/v1/analyzer-worklist/{item_id}/enqueue").status_code == 200
+
+    calls = {"n": 0}
+
+    def fail_send(analyzer_obj, payload: str):
+        calls["n"] += 1
+        return False, "connection refused", None
+
+    import app.analyzer_orders as orders
+
+    monkeypatch.setattr(orders, "send_order_over_tcp", fail_send)
+    first = client.post("/api/v1/analyzer-orders/process?limit=5")
+    assert first.status_code == 200
+    assert first.json()["processed"] == 1
+    assert first.json()["attempts"][0]["state"] == "failed"
+    # retry was auto-queued
+    second = client.post("/api/v1/analyzer-orders/process?limit=5")
+    assert second.status_code == 200
+    assert second.json()["processed"] == 1
+    assert second.json()["attempts"][0]["state"] == "failed"
+    assert calls["n"] == 2
+    failed_item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
+    assert failed_item["status"] == "failed"
+    attempts = client.get("/api/v1/analyzer-orders/attempts", params={"worklist_item_id": item_id})
+    assert attempts.status_code == 200
+    assert attempts.json()["total"] == 2
+
+
+def test_order_queue_marks_acknowledged_on_tcp_success(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add_all([branch, test])
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "MAC-UAT-01",
+            "vendor": "LaboraIQ",
+            "model": "Mac Simulator",
+            "protocol": "HL7_LAW",
+            "host": "192.168.10.80",
+            "port": 55001,
+            "connection_mode": "bidirectional",
+            "retry_limit": 0,
+        },
+    ).json()
+    assert (
+        client.post(
+            f"/api/v1/analyzers/{analyzer['id']}/mappings",
+            json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+        ).status_code
+        == 201
+    )
+    intake = client.post(
+        "/api/v1/intake-workflows",
+        json={
+            "full_name": "Ack Patient",
+            "phone": "+919811122255",
+            "email": "ack@example.com",
+            "age_years": 30,
+            "sex": "Male",
+            "blood_group": "B+",
+            "country": "India",
+            "race": "Asian",
+            "nationality": "Indian",
+            "visit_type": "OP",
+            "department": "Medicine",
+            "ward": "OP Clinic",
+            "doctor_name": "Dr Example",
+            "diagnosis": "Z00.0",
+            "test_ids": [str(test.id)],
+        },
+    ).json()
+    barcode = client.post(
+        f"/api/v1/orders/{intake['order_id']}/payment", json={"payment_method": "CASH"}
+    ).json()["specimens"][0]["barcode"]
+    client.post(
+        f"/api/v1/specimens/{barcode}/collect",
+        json={"collection_location": "OP", "container_count": 1},
+    )
+    client.post(f"/api/v1/specimens/{barcode}/receive")
+    client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"})
+    item_id = client.get("/api/v1/analyzer-worklist", params={"status": "pending"}).json()["items"][
+        0
+    ]["id"]
+    client.post(f"/api/v1/analyzer-worklist/{item_id}/enqueue")
+
+    import app.analyzer_orders as orders
+
+    monkeypatch.setattr(
+        orders,
+        "send_order_over_tcp",
+        lambda analyzer_obj, payload: (True, "TCP order payload delivered", None),
+    )
+    processed = client.post("/api/v1/analyzer-orders/process")
+    assert processed.status_code == 200
+    assert processed.json()["attempts"][0]["state"] == "acknowledged"
+    assert processed.json()["attempts"][0]["payload_hash"]
+    item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
+    assert item["status"] == "completed"
+    assert item["latest_attempt_state"] == "acknowledged"
