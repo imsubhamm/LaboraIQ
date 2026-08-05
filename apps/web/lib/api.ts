@@ -10,6 +10,23 @@ export class ApiError extends Error {
   }
 }
 
+function errorMessage(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (!item || typeof item !== "object") return String(item);
+      const issue = item as { msg?: unknown; loc?: unknown[] };
+      const field = Array.isArray(issue.loc) ? issue.loc.at(-1) : undefined;
+      return `${field ? `${String(field)}: ` : ""}${String(issue.msg ?? "Invalid value")}`;
+    });
+    return messages.join("; ");
+  }
+  if (detail && typeof detail === "object" && "msg" in detail) {
+    return String((detail as { msg: unknown }).msg);
+  }
+  return "Request failed";
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${baseUrl}${path}`, {
@@ -26,7 +43,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: "Request failed" }));
-    throw new ApiError(response.status, body.detail ?? "Request failed");
+    throw new ApiError(response.status, errorMessage(body.detail));
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

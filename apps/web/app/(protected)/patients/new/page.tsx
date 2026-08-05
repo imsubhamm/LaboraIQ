@@ -273,7 +273,7 @@ export default function NewPatientPage() {
             <div className="form-grid">
               <label className="wide">Find returning patient
                 <div className="patient-search">
-                  <div className="input-with-icon"><Search size={16}/><input placeholder="Patient UUID, patient number, phone, or email" value={patientQuery} onChange={e => setPatientQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void findPatient(); } }}/></div>
+                  <div className="input-with-icon"><Search size={16}/><input placeholder="Patient name, UUID, patient number, phone, or email" value={patientQuery} onChange={e => setPatientQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void findPatient(); } }}/></div>
                   <button type="button" onClick={() => void findPatient()} disabled={searchingPatient || patientQuery.trim().length < 3}>{searchingPatient ? "Searching…" : "Search"}</button>
                 </div>
                 {patientMatch && <small className="patient-match"><Check size={12}/> Existing patient {patientMatch.patient_number} · UUID {patientMatch.id} · {patientMatch.visit_count} previous visit(s). Details loaded and editable.</small>}
@@ -301,9 +301,21 @@ export default function NewPatientPage() {
             <div className="test-picker">
               <input aria-label="Find a test" placeholder="Search test name or code…" value={testQuery} onChange={e => setTestQuery(e.target.value)}/>
               {tests.length > 0 && <div className="selected-tests"><strong>{tests.length} selected</strong>{tests.map(testId => { const test = catalog.find(item => item.id === testId); return <button type="button" key={testId} onClick={() => toggleTest(testId)}>{test?.name ?? testId}<X size={12}/></button>; })}</div>}
-              <div className="test-result-status"><span>{testQuery.trim() ? `${matchingTests.length} matching tests` : `Showing 20 of ${catalog.length} tests`}</span>{!testQuery.trim() && <small>Search to find the complete catalogue.</small>}</div>
+              <div className="test-result-status"><span>{testQuery.trim() ? `${matchingTests.length} matching tests` : `Showing ${visibleTests.length} of ${catalog.length} tests`}</span>{!testQuery.trim() && catalog.length > visibleTests.length && <small>Search to find the complete catalogue.</small>}</div>
               <div className="test-options">
-                {visibleTests.map(test => <button type="button" key={test.id} className={`test-option ${tests.includes(test.id) ? "selected" : ""}`} aria-pressed={tests.includes(test.id)} onClick={() => toggleTest(test.id)}><span className="check-box"><Check size={13}/></span><span className="test-copy">{test.name}<small>{test.code} · {test.specimen_type} · ₹{test.price}</small></span></button>)}
+                {visibleTests.map(test => {
+                  const selected = tests.includes(test.id);
+                  return (
+                    <label key={test.id} className={`test-option ${selected ? "selected" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleTest(test.id)}
+                      />
+                      <span className="test-copy">{test.name}<small>{test.code} · {test.specimen_type} · ₹{test.price}</small></span>
+                    </label>
+                  );
+                })}
               </div>
               {visibleTests.length === 0 && <div className="test-empty">No tests match “{testQuery}”.</div>}
               {matchingTests.length > visibleTests.length && <div className="test-more-hint">Showing the first {visibleTests.length} results. Refine the search to narrow the list.</div>}

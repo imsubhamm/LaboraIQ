@@ -92,6 +92,9 @@ class AnalyzerCreate(APIModel):
     connection_mode: str = Field(
         default="bidirectional", pattern=r"^(unidirectional|bidirectional)$"
     )
+    connection_timeout_seconds: int = Field(default=3, ge=1, le=15)
+    retry_limit: int = Field(default=2, ge=0, le=5)
+    heartbeat_interval_seconds: int = Field(default=60, ge=15, le=3600)
 
     @field_validator("host")
     @classmethod
@@ -110,6 +113,9 @@ class AnalyzerUpdate(APIModel):
     host: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     connection_mode: str | None = Field(default=None, pattern=r"^(unidirectional|bidirectional)$")
+    connection_timeout_seconds: int | None = Field(default=None, ge=1, le=15)
+    retry_limit: int | None = Field(default=None, ge=0, le=5)
+    heartbeat_interval_seconds: int | None = Field(default=None, ge=15, le=3600)
     status: Status | None = None
 
     @field_validator("host")
@@ -127,6 +133,63 @@ class AnalyzerRead(AnalyzerCreate):
     id: uuid.UUID
     organization_id: uuid.UUID
     status: Status
+    connection_status: str
+    last_connection_test_at: datetime | None
+    last_connected_at: datetime | None
+    last_connection_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalyzerConnectionEventRead(APIModel):
+    id: uuid.UUID
+    analyzer_id: uuid.UUID
+    event_type: str
+    attempt: int
+    success: bool
+    latency_ms: int | None
+    message: str
+    correlation_id: str
+    occurred_at: datetime
+
+
+class AnalyzerConnectionTestRead(APIModel):
+    analyzer_id: uuid.UUID
+    connection_status: str
+    attempts: int
+    success: bool
+    latency_ms: int | None
+    message: str
+    tested_at: datetime
+
+
+class AnalyzerParameterMappingCreate(APIModel):
+    parameter_id: uuid.UUID
+    machine_parameter_code: str = Field(min_length=1, max_length=100)
+    unit: str | None = Field(default=None, max_length=40)
+
+
+class AnalyzerTestMappingCreate(APIModel):
+    test_id: uuid.UUID
+    machine_test_code: str = Field(min_length=1, max_length=100)
+    parameters: list[AnalyzerParameterMappingCreate] = Field(default_factory=list)
+
+
+class AnalyzerParameterMappingRead(AnalyzerParameterMappingCreate):
+    id: uuid.UUID
+    parameter_name: str
+    lis_parameter_code: str
+
+
+class AnalyzerTestMappingRead(APIModel):
+    id: uuid.UUID
+    analyzer_id: uuid.UUID
+    test_id: uuid.UUID
+    lis_test_code: str
+    test_name: str
+    machine_test_code: str
+    status: Status
+    parameters: list[AnalyzerParameterMappingRead]
     created_at: datetime
     updated_at: datetime
 

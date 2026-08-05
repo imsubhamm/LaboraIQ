@@ -1,7 +1,10 @@
+import ipaddress
+import socket
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any, TypeVar, cast
 
 from fastapi import (
     APIRouter,
@@ -24,6 +27,9 @@ from app.auth import AuthContext, require_permission
 from app.database import get_db
 from app.models import (
     Analyzer,
+    AnalyzerConnectionEvent,
+    AnalyzerParameterMapping,
+    AnalyzerTestMapping,
     AuditEvent,
     Branch,
     Department,
@@ -42,8 +48,12 @@ from app.models import (
     UserRoleAssignment,
 )
 from app.schemas import (
+    AnalyzerConnectionEventRead,
+    AnalyzerConnectionTestRead,
     AnalyzerCreate,
     AnalyzerRead,
+    AnalyzerTestMappingCreate,
+    AnalyzerTestMappingRead,
     AnalyzerUpdate,
     AssignmentCreate,
     AssignmentRead,
@@ -83,6 +93,7 @@ from app.schemas import (
 router = APIRouter()
 Db = Annotated[Session, Depends(get_db)]
 ModelT = TypeVar("ModelT")
+APPROVED_ANALYZER_OVERLAY_TARGETS = {ipaddress.ip_address("100.122.201.68")}
 
 
 def page(db: Session, statement: Any, model: type[ModelT], limit: int, offset: int) -> Page[ModelT]:
@@ -126,12 +137,16 @@ def get_tenant_record(
 
 
 def snapshot(record: Any, keys: list[str]) -> dict[str, Any]:
-    return jsonable_encoder({key: getattr(record, key) for key in keys})
+    return cast(
+        dict[str, Any],
+        jsonable_encoder({key: getattr(record, key) for key in keys}),
+    )
 
 
 ANALYZER_FIELDS = [
     "branch_id", "code", "vendor", "model", "protocol", "host", "port",
-    "connection_mode", "status",
+    "connection_mode", "connection_timeout_seconds", "retry_limit",
+    "heartbeat_interval_seconds", "connection_status", "status",
 ]
 
 
@@ -202,8 +217,12 @@ def update_analyzer(
     if not context.can_access_branch(analyzer.branch_id):
         raise HTTPException(status_code=403, detail="Branch access denied")
     previous = snapshot(analyzer, ANALYZER_FIELDS)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for key, value in changes.items():
         setattr(analyzer, key, value)
+    if "host" in changes or "port" in changes:
+        analyzer.connection_status = "never_tested"
+        analyzer.last_connection_error = None
     analyzer.updated_by = context.user_id
     record_event(
         db, request, context,
@@ -213,6 +232,302 @@ def update_analyzer(
     )
     commit(db)
     return analyzer
+
+
+def get_accessible_analyzer(
+    db: Session, analyzer_id: uuid.UUID, context: AuthContext
+) -> Analyzer:
+    analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
+    if not context.can_access_branch(analyzer.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    return analyzer
+
+
+def validate_private_analyzer_target(host: str) -> None:
+    address = ipaddress.ip_address(host)
+    is_approved_private_target = (
+        address.is_private or address in APPROVED_ANALYZER_OVERLAY_TARGETS
+    )
+    if (
+        not is_approved_private_target
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Analyzer connection tests are restricted to private network addresses",
+        )
+
+
+def probe_analyzer_connection(
+    analyzer: Analyzer,
+    request: Request,
+    db: Session,
+    context: AuthContext,
+    event_type: str,
+) -> AnalyzerConnectionTestRead:
+    validate_private_analyzer_target(analyzer.host)
+    tested_at = datetime.now(UTC)
+    analyzer.last_connection_test_at = tested_at
+    final_success = False
+    final_latency: int | None = None
+    final_message = "Connection failed"
+    attempts = analyzer.retry_limit + 1
+    for attempt in range(1, attempts + 1):
+        started = time.monotonic()
+        try:
+            with socket.create_connection(
+                (analyzer.host, analyzer.port), timeout=analyzer.connection_timeout_seconds
+            ):
+                final_latency = max(0, round((time.monotonic() - started) * 1000))
+                final_success = True
+                final_message = "TCP connection established"
+        except OSError as error:
+            final_latency = max(0, round((time.monotonic() - started) * 1000))
+            final_message = str(error)[:500] or error.__class__.__name__
+        db.add(
+            AnalyzerConnectionEvent(
+                organization_id=context.organization_id,
+                branch_id=analyzer.branch_id,
+                analyzer_id=analyzer.id,
+                event_type=event_type,
+                attempt=attempt,
+                success=final_success,
+                latency_ms=final_latency,
+                message=final_message,
+                correlation_id=request.state.correlation_id,
+                occurred_at=datetime.now(UTC),
+            )
+        )
+        if final_success:
+            attempts = attempt
+            break
+    analyzer.connection_status = "connected" if final_success else "error"
+    analyzer.last_connection_error = None if final_success else final_message
+    if final_success:
+        analyzer.last_connected_at = tested_at
+    record_event(
+        db,
+        request,
+        context,
+        event_type=f"analyzer.{event_type}",
+        entity_type="analyzer",
+        entity_id=analyzer.id,
+        branch_id=analyzer.branch_id,
+        action=event_type,
+        new={
+            "connection_status": analyzer.connection_status,
+            "attempts": attempts,
+            "latency_ms": final_latency,
+            "message": final_message,
+        },
+    )
+    commit(db)
+    return AnalyzerConnectionTestRead(
+        analyzer_id=analyzer.id,
+        connection_status=analyzer.connection_status,
+        attempts=attempts,
+        success=final_success,
+        latency_ms=final_latency,
+        message=final_message,
+        tested_at=tested_at,
+    )
+
+
+@router.post(
+    "/analyzers/{analyzer_id}/connection-test", response_model=AnalyzerConnectionTestRead
+)
+def test_analyzer_connection(
+    analyzer_id: uuid.UUID,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> AnalyzerConnectionTestRead:
+    analyzer = get_accessible_analyzer(db, analyzer_id, context)
+    return probe_analyzer_connection(analyzer, request, db, context, "connection_test")
+
+
+@router.post(
+    "/analyzers/{analyzer_id}/heartbeat", response_model=AnalyzerConnectionTestRead
+)
+def heartbeat_analyzer(
+    analyzer_id: uuid.UUID,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> AnalyzerConnectionTestRead:
+    analyzer = get_accessible_analyzer(db, analyzer_id, context)
+    return probe_analyzer_connection(analyzer, request, db, context, "heartbeat")
+
+
+@router.get(
+    "/analyzers/{analyzer_id}/connection-events",
+    response_model=list[AnalyzerConnectionEventRead],
+)
+def list_analyzer_connection_events(
+    analyzer_id: uuid.UUID,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> list[AnalyzerConnectionEvent]:
+    analyzer = get_accessible_analyzer(db, analyzer_id, context)
+    return list(
+        db.scalars(
+            select(AnalyzerConnectionEvent)
+            .where(AnalyzerConnectionEvent.analyzer_id == analyzer.id)
+            .order_by(AnalyzerConnectionEvent.occurred_at.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def analyzer_mapping_read(
+    db: Session, mapping: AnalyzerTestMapping
+) -> AnalyzerTestMappingRead:
+    test = db.get(TestCatalogItem, mapping.test_id)
+    parameter_ids = [item.parameter_id for item in mapping.parameters]
+    catalog_parameters = {
+        item.id: item
+        for item in db.scalars(
+            select(TestCatalogParameter).where(TestCatalogParameter.id.in_(parameter_ids))
+        ).all()
+    }
+    return AnalyzerTestMappingRead(
+        id=mapping.id,
+        analyzer_id=mapping.analyzer_id,
+        test_id=mapping.test_id,
+        lis_test_code=test.code if test else "Unknown",
+        test_name=test.name if test else "Unknown test",
+        machine_test_code=mapping.machine_test_code,
+        status=mapping.status,
+        parameters=[
+            {
+                "id": item.id,
+                "parameter_id": item.parameter_id,
+                "parameter_name": catalog_parameters[item.parameter_id].name,
+                "lis_parameter_code": catalog_parameters[item.parameter_id].external_code,
+                "machine_parameter_code": item.machine_parameter_code,
+                "unit": item.unit,
+            }
+            for item in mapping.parameters
+            if item.parameter_id in catalog_parameters
+        ],
+        created_at=mapping.created_at,
+        updated_at=mapping.updated_at,
+    )
+
+
+@router.get(
+    "/analyzers/{analyzer_id}/mappings", response_model=list[AnalyzerTestMappingRead]
+)
+def list_analyzer_mappings(
+    analyzer_id: uuid.UUID,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+) -> list[AnalyzerTestMappingRead]:
+    analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
+    if not context.can_access_branch(analyzer.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    mappings = db.scalars(
+        select(AnalyzerTestMapping)
+        .where(AnalyzerTestMapping.analyzer_id == analyzer.id)
+        .order_by(AnalyzerTestMapping.machine_test_code, AnalyzerTestMapping.id)
+    ).all()
+    return [analyzer_mapping_read(db, item) for item in mappings]
+
+
+@router.post(
+    "/analyzers/{analyzer_id}/mappings",
+    response_model=AnalyzerTestMappingRead,
+    status_code=201,
+)
+def save_analyzer_mapping(
+    analyzer_id: uuid.UUID,
+    payload: AnalyzerTestMappingCreate,
+    request: Request,
+    response: Response,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> AnalyzerTestMappingRead:
+    analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
+    if not context.can_access_branch(analyzer.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    test = get_tenant_record(db, TestCatalogItem, payload.test_id, context)
+    supplied_parameter_ids = [item.parameter_id for item in payload.parameters]
+    if len(supplied_parameter_ids) != len(set(supplied_parameter_ids)):
+        raise HTTPException(status_code=422, detail="Each LIS parameter can be mapped only once")
+    machine_parameter_codes = [
+        item.machine_parameter_code.strip().upper() for item in payload.parameters
+    ]
+    if len(machine_parameter_codes) != len(set(machine_parameter_codes)):
+        raise HTTPException(status_code=422, detail="Machine parameter codes must be unique")
+    valid_parameter_ids = set(
+        db.scalars(
+            select(TestCatalogParameter.id).where(TestCatalogParameter.test_id == test.id)
+        ).all()
+    )
+    if not set(supplied_parameter_ids).issubset(valid_parameter_ids):
+        raise HTTPException(status_code=422, detail="A parameter does not belong to this LIS test")
+    mapping = db.scalar(
+        select(AnalyzerTestMapping).where(
+            AnalyzerTestMapping.analyzer_id == analyzer.id,
+            AnalyzerTestMapping.test_id == test.id,
+        )
+    )
+    previous = None
+    if mapping:
+        previous = {
+            "machine_test_code": mapping.machine_test_code,
+            "parameter_count": len(mapping.parameters),
+        }
+        mapping.machine_test_code = payload.machine_test_code.strip().upper()
+        mapping.updated_by = context.user_id
+        mapping.parameters.clear()
+        flush(db)
+        response.status_code = status.HTTP_200_OK
+        event_type = "analyzer.mapping_updated"
+        action = "update"
+    else:
+        mapping = AnalyzerTestMapping(
+            organization_id=context.organization_id,
+            analyzer_id=analyzer.id,
+            test_id=test.id,
+            machine_test_code=payload.machine_test_code.strip().upper(),
+            created_by=context.user_id,
+            updated_by=context.user_id,
+        )
+        db.add(mapping)
+        event_type = "analyzer.mapping_created"
+        action = "create"
+    mapping.parameters.extend(
+        AnalyzerParameterMapping(
+            parameter_id=item.parameter_id,
+            machine_parameter_code=item.machine_parameter_code.strip().upper(),
+            unit=item.unit.strip() if item.unit else None,
+        )
+        for item in payload.parameters
+    )
+    flush(db)
+    record_event(
+        db,
+        request,
+        context,
+        event_type=event_type,
+        entity_type="analyzer_test_mapping",
+        entity_id=mapping.id,
+        branch_id=analyzer.branch_id,
+        action=action,
+        previous=previous,
+        new={
+            "lis_test_code": test.code,
+            "machine_test_code": mapping.machine_test_code,
+            "parameter_count": len(mapping.parameters),
+        },
+    )
+    commit(db)
+    return analyzer_mapping_read(db, mapping)
 
 
 @router.get("/organizations", response_model=Page[OrganizationRead])
@@ -931,7 +1246,7 @@ def lookup_patient(
     context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
     query: Annotated[str, Query(min_length=3, max_length=320)],
 ) -> PatientLookupRead | None:
-    """Find a returning patient by UUID, patient number, phone, or email."""
+    """Find a returning patient by UUID, patient number, phone, email, or exact name."""
     value = query.strip()
     conditions = [
         Patient.patient_number == value,
@@ -948,6 +1263,27 @@ def lookup_patient(
             or_(*conditions),
         )
     )
+    if patient is None:
+        name_matches = list(
+            db.scalars(
+                select(Patient)
+                .where(
+                    Patient.organization_id == context.organization_id,
+                    func.lower(Patient.full_name) == value.lower(),
+                )
+                .order_by(Patient.updated_at.desc(), Patient.id.desc())
+                .limit(2)
+            ).all()
+        )
+        if len(name_matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Multiple patients have this name. Search using patient number, "
+                    "phone, email, or UUID."
+                ),
+            )
+        patient = name_matches[0] if name_matches else None
     if patient is None:
         return None
     visit_count, last_visit_at = db.execute(
@@ -1161,7 +1497,7 @@ def create_intake_workflow(
             recorded_by=context.user_id,
             demographics={
                 **{
-                    key: (value.isoformat() if hasattr(value, "isoformat") else value)
+                    key: (value.isoformat() if isinstance(value, date) else value)
                     for key, value in patient_values.items()
                 },
                 "visit_type": payload.visit_type,

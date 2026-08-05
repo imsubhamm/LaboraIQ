@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { can } from "@/lib/auth";
 import { isSessionValid } from "@/proxy";
 import { ResourcePage } from "@/components/resource-page";
+import { SpecimenBarcode } from "@/components/specimen-barcode";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/organizations" }));
 vi.mock("@/lib/api", async () => {
@@ -35,5 +36,13 @@ describe("platform administration UI", () => {
     render(<ResourcePage title="Audit events" description="Evidence" endpoint="audit-events"
       emptyMessage="No events" columns={[{key:"action",label:"Action"}]}/>);
     expect(await screen.findByText("Service unavailable")).toBeInTheDocument();
+  });
+
+  it("renders a real Code 128 specimen barcode for the exact identifier", async () => {
+    const value = "LQ0805063919C2AA0601";
+    const { container } = render(<SpecimenBarcode value={value}/>);
+    const barcode = await screen.findByRole("img", {name: `Code 128 specimen barcode ${value}`});
+    expect(barcode).toHaveAttribute("data-barcode-value", value);
+    expect(container.querySelectorAll("svg rect").length).toBeGreaterThan(10);
   });
 });

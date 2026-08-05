@@ -1,5 +1,9 @@
 # LaboraIQ
 
+Current development handoff: [`docs/CURSOR_HANDOFF.md`](docs/CURSOR_HANDOFF.md)
+
+Production and analyzer UAT runbook: [`docs/PRODUCTION_UAT_RUNBOOK.md`](docs/PRODUCTION_UAT_RUNBOOK.md)
+
 LaboraIQ is a cloud Laboratory Information System foundation that supports both
 existing-LIS enhancement (Mode A) and a future complete LIS (Mode B). Milestone 1
 contains tenant/branch configuration, identity abstraction, configurable RBAC,
@@ -60,4 +64,3 @@ Terraform is plan-only until explicit AWS credentials, approved network/ingress
 design, quality review and deployment approval exist. See
 `infrastructure/terraform/README.md`. Do not commit tfvars, state, credentials, or
 secret values.
-

@@ -1,11 +1,13 @@
 import uuid
 from io import BytesIO
 
+import app.api as api_module
 import pytest
 from app.auth import AuthContext, get_auth_context
 from app.config import Settings
 from app.main import app
 from app.models import (
+    AnalyzerConnectionEvent,
     AuditEvent,
     Branch,
     LabOrder,
@@ -16,6 +18,7 @@ from app.models import (
     Role,
     Specimen,
     TestCatalogItem,
+    TestCatalogParameter,
     User,
 )
 from fastapi.testclient import TestClient
@@ -311,6 +314,10 @@ def test_returning_patient_is_updated_and_history_is_appended(
     assert lookup.json()["visit_count"] == 1
     assert lookup.json()["additional_patient_data"] == {"MRN": "MRN-1001"}
 
+    name_lookup = client.get("/api/v1/patients/lookup", params={"query": "returning patient"})
+    assert name_lookup.status_code == 200
+    assert name_lookup.json()["id"] == patient_id
+
     payload.update(
         {
             "patient_id": patient_id,
@@ -387,3 +394,183 @@ def test_analyzer_configuration_is_branch_scoped_validated_and_audited(
     assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "analyzer.created"))
     invalid = {**payload, "code": "HEM-02", "host": "not-an-ip"}
     assert client.post("/api/v1/analyzers", json=invalid).status_code == 422
+
+
+def test_analyzer_test_and_parameter_mapping_can_be_created_and_updated(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="CBC",
+        name="Complete Blood Count",
+        specimen_type="Whole blood",
+        container_type="EDTA",
+        price="450.00",
+    )
+    db.add_all([branch, test])
+    db.flush()
+    parameter = TestCatalogParameter(
+        test_id=test.id, name="Haemoglobin", external_code="HGB", display_order=1
+    )
+    db.add(parameter)
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "HEM-01",
+            "vendor": "Sysmex",
+            "model": "XN-1000",
+            "protocol": "ASTM",
+            "host": "192.168.10.50",
+            "port": 5000,
+            "connection_mode": "bidirectional",
+        },
+    ).json()
+    payload = {
+        "test_id": str(test.id),
+        "machine_test_code": "cbc_order",
+        "parameters": [
+            {
+                "parameter_id": str(parameter.id),
+                "machine_parameter_code": "hgb_result",
+                "unit": "g/dL",
+            }
+        ],
+    }
+    created = client.post(f"/api/v1/analyzers/{analyzer['id']}/mappings", json=payload)
+    assert created.status_code == 201
+    assert created.json()["machine_test_code"] == "CBC_ORDER"
+    assert created.json()["parameters"][0]["machine_parameter_code"] == "HGB_RESULT"
+    assert created.json()["parameters"][0]["unit"] == "g/dL"
+    payload["machine_test_code"] = "CBC"
+    updated = client.post(f"/api/v1/analyzers/{analyzer['id']}/mappings", json=payload)
+    assert updated.status_code == 200
+    listing = client.get(f"/api/v1/analyzers/{analyzer['id']}/mappings")
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
+    assert listing.json()[0]["machine_test_code"] == "CBC"
+    assert db.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "analyzer.mapping_updated")
+    )
+
+
+def test_analyzer_connection_test_retries_updates_status_and_logs_events(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    db.add(branch)
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "HEM-01",
+            "vendor": "Sysmex",
+            "model": "XN-1000",
+            "protocol": "ASTM",
+            "host": "192.168.10.50",
+            "port": 5000,
+            "connection_mode": "bidirectional",
+            "connection_timeout_seconds": 2,
+            "retry_limit": 1,
+            "heartbeat_interval_seconds": 60,
+        },
+    ).json()
+    calls = 0
+
+    def fail_connection(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(api_module.socket, "create_connection", fail_connection)
+    failed = client.post(f"/api/v1/analyzers/{analyzer['id']}/connection-test")
+    assert failed.status_code == 200
+    assert failed.json()["success"] is False
+    assert failed.json()["attempts"] == 2
+    assert calls == 2
+    assert db.query(AnalyzerConnectionEvent).count() == 2
+
+    class ConnectedSocket:
+        def __enter__(self) -> "ConnectedSocket":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        api_module.socket, "create_connection", lambda *args, **kwargs: ConnectedSocket()
+    )
+    connected = client.post(f"/api/v1/analyzers/{analyzer['id']}/heartbeat")
+    assert connected.status_code == 200
+    assert connected.json()["connection_status"] == "connected"
+    events = client.get(f"/api/v1/analyzers/{analyzer['id']}/connection-events")
+    assert events.status_code == 200
+    assert events.json()[0]["event_type"] == "heartbeat"
+
+
+def test_analyzer_connection_test_rejects_non_private_target(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    db.add(branch)
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "PUBLIC-01",
+            "vendor": "Example",
+            "model": "Public endpoint",
+            "protocol": "PROPRIETARY",
+            "host": "8.8.8.8",
+            "port": 53,
+            "connection_mode": "unidirectional",
+        },
+    ).json()
+    response = client.post(f"/api/v1/analyzers/{analyzer['id']}/connection-test")
+    assert response.status_code == 422
+
+
+def test_analyzer_connection_test_allows_tailscale_target(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    db.add(branch)
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "TAILSCALE-01",
+            "vendor": "LaboraIQ",
+            "model": "Mac Simulator",
+            "protocol": "PROPRIETARY",
+            "host": "100.122.201.68",
+            "port": 55001,
+            "connection_mode": "bidirectional",
+            "retry_limit": 0,
+        },
+    ).json()
+
+    class ConnectedSocket:
+        def __enter__(self) -> "ConnectedSocket":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        api_module.socket, "create_connection", lambda *args, **kwargs: ConnectedSocket()
+    )
+    response = client.post(f"/api/v1/analyzers/{analyzer['id']}/connection-test")
+    assert response.status_code == 200
+    assert response.json()["success"] is True

@@ -92,9 +92,79 @@ class Analyzer(Base, TimestampMixin):
     host: Mapped[str] = mapped_column(String(255))
     port: Mapped[int] = mapped_column(Integer)
     connection_mode: Mapped[str] = mapped_column(String(20), default="bidirectional")
+    connection_status: Mapped[str] = mapped_column(String(30), default="never_tested")
+    connection_timeout_seconds: Mapped[int] = mapped_column(Integer, default=3)
+    retry_limit: Mapped[int] = mapped_column(Integer, default=2)
+    heartbeat_interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    last_connection_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_connection_error: Mapped[str | None] = mapped_column(String(500))
     status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
+class AnalyzerConnectionEvent(Base):
+    __tablename__ = "analyzer_connection_events"
+    __table_args__ = (
+        Index("ix_analyzer_connection_events_recent", "analyzer_id", "occurred_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    analyzer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analyzers.id", ondelete="CASCADE"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    success: Mapped[bool] = mapped_column(Boolean)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    message: Mapped[str] = mapped_column(String(500))
+    correlation_id: Mapped[str] = mapped_column(String(100), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AnalyzerTestMapping(Base, TimestampMixin):
+    __tablename__ = "analyzer_test_mappings"
+    __table_args__ = (
+        UniqueConstraint("analyzer_id", "test_id", name="uq_analyzer_test_mapping"),
+        UniqueConstraint(
+            "analyzer_id", "machine_test_code", name="uq_analyzer_machine_test_code"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    analyzer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analyzers.id", ondelete="CASCADE"), index=True
+    )
+    test_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("test_catalog_items.id"), index=True)
+    machine_test_code: Mapped[str] = mapped_column(String(100))
+    status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    parameters: Mapped[list["AnalyzerParameterMapping"]] = relationship(
+        back_populates="test_mapping", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class AnalyzerParameterMapping(Base, TimestampMixin):
+    __tablename__ = "analyzer_parameter_mappings"
+    __table_args__ = (
+        UniqueConstraint("test_mapping_id", "parameter_id", name="uq_mapping_parameter"),
+        UniqueConstraint(
+            "test_mapping_id", "machine_parameter_code", name="uq_mapping_machine_parameter"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    test_mapping_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analyzer_test_mappings.id", ondelete="CASCADE"), index=True
+    )
+    parameter_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("test_catalog_parameters.id"), index=True
+    )
+    machine_parameter_code: Mapped[str] = mapped_column(String(100))
+    unit: Mapped[str | None] = mapped_column(String(40))
+    test_mapping: Mapped[AnalyzerTestMapping] = relationship(back_populates="parameters")
 
 
 class User(Base, TimestampMixin):

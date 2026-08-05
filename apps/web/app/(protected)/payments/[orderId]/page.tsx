@@ -7,6 +7,7 @@ import {
   Smartphone, WalletCards
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { SpecimenBarcode } from "@/components/specimen-barcode";
 
 type PaymentMethod = "UPI" | "CARD" | "CASH";
 type PaymentSummary = {
@@ -95,7 +96,7 @@ export default function PaymentPage() {
           {result.specimens.map(specimen => <article className="specimen-label" key={specimen.barcode}>
             <div className="label-brand">LaboraIQ <small>SPECIMEN</small></div>
             <strong>{result.patient_name}</strong><span>{result.patient_number} · {result.order_number}</span>
-            <div className="barcode-bars" aria-hidden="true"/>
+            <SpecimenBarcode value={specimen.barcode}/>
             <b>{specimen.barcode}</b>
             <footer><span>{specimen.specimen_type}</span><span>{specimen.container_type}</span></footer>
           </article>)}
