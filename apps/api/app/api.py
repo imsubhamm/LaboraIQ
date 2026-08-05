@@ -39,6 +39,7 @@ from app.models import (
     Department,
     Invoice,
     LabOrder,
+    LabResult,
     OrderTest,
     Organization,
     Patient,
@@ -51,6 +52,13 @@ from app.models import (
     TestCatalogParameter,
     User,
     UserRoleAssignment,
+)
+from app.results import (
+    build_result_pdf,
+    normalize_worklist_result,
+    pathologist_validate,
+    release_result,
+    technical_review,
 )
 from app.schemas import (
     AnalyzerConnectionEventRead,
@@ -76,6 +84,9 @@ from app.schemas import (
     DepartmentUpdate,
     IntakeCreate,
     IntakeRead,
+    LabResultNotes,
+    LabResultObservationRead,
+    LabResultRead,
     OrganizationCreate,
     OrganizationRead,
     OrganizationUpdate,
@@ -2473,4 +2484,182 @@ def process_analyzer_order_queue(
     return AnalyzerOrderProcessRead(
         processed=len(attempts),
         attempts=[order_attempt_read(item) for item in attempts],
+    )
+
+
+def lab_result_read(db: Session, result: LabResult) -> LabResultRead:
+    specimen = db.get(Specimen, result.specimen_id)
+    order = db.get(LabOrder, result.order_id)
+    patient = db.get(Patient, order.patient_id) if order else None
+    test = db.get(TestCatalogItem, result.test_id)
+    analyzer = db.get(Analyzer, result.analyzer_id)
+    return LabResultRead(
+        id=result.id,
+        worklist_item_id=result.worklist_item_id,
+        specimen_id=result.specimen_id,
+        specimen_barcode=specimen.barcode if specimen else "",
+        accession_number=specimen.accession_number if specimen else None,
+        order_id=result.order_id,
+        order_number=order.order_number if order else "",
+        patient_number=patient.patient_number if patient else "",
+        patient_name=patient.full_name if patient else "",
+        test_id=result.test_id,
+        lis_test_code=test.code if test else "",
+        test_name=test.name if test else "",
+        analyzer_id=result.analyzer_id,
+        analyzer_code=analyzer.code if analyzer else "",
+        status=result.status,
+        correlation_id=result.correlation_id,
+        report_number=result.report_number,
+        technical_reviewed_at=result.technical_reviewed_at,
+        technical_review_notes=result.technical_review_notes,
+        pathologist_validated_at=result.pathologist_validated_at,
+        pathologist_notes=result.pathologist_notes,
+        released_at=result.released_at,
+        observations=[
+            LabResultObservationRead(
+                id=item.id,
+                sequence_no=item.sequence_no,
+                parameter_id=item.parameter_id,
+                machine_parameter_code=item.machine_parameter_code,
+                parameter_name=item.parameter_name,
+                value=item.value,
+                unit=item.unit,
+                reference_low=item.reference_low,
+                reference_high=item.reference_high,
+                reference_text=item.reference_text,
+                flag=item.flag,
+            )
+            for item in sorted(result.observations, key=lambda row: row.sequence_no)
+        ],
+        created_at=result.created_at,
+        updated_at=result.updated_at,
+    )
+
+
+@router.get("/results", response_model=Page[LabResultRead])
+def list_lab_results(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.read"))],
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[LabResultRead]:
+    filters = [LabResult.organization_id == context.organization_id]
+    if not context.is_organization_scoped:
+        filters.append(LabResult.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
+    if status_filter:
+        filters.append(LabResult.status == status_filter.strip().lower())
+    rows = db.execute(
+        select(LabResult, func.count(LabResult.id).over().label("total_count"))
+        .where(*filters)
+        .order_by(LabResult.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    total = rows[0].total_count if rows else 0
+    if not rows and offset:
+        total = db.scalar(select(func.count(LabResult.id)).where(*filters)) or 0
+    return Page[LabResultRead](
+        items=[lab_result_read(db, item) for item, _ in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/results/{result_id}", response_model=LabResultRead)
+def get_lab_result(
+    result_id: uuid.UUID,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.read"))],
+) -> LabResultRead:
+    result = get_tenant_record(db, LabResult, result_id, context)
+    if not context.can_access_branch(result.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    return lab_result_read(db, result)
+
+
+@router.post(
+    "/analyzer-worklist/{item_id}/normalize-result",
+    response_model=LabResultRead,
+)
+def normalize_worklist_oru(
+    item_id: uuid.UUID,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.review"))],
+) -> LabResultRead:
+    item = get_tenant_record(db, AnalyzerWorklistItem, item_id, context)
+    if not context.can_access_branch(item.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    result = normalize_worklist_result(db, request, context, item)
+    commit(db)
+    return lab_result_read(db, result)
+
+
+@router.post("/results/{result_id}/technical-review", response_model=LabResultRead)
+def review_lab_result(
+    result_id: uuid.UUID,
+    payload: LabResultNotes,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.review"))],
+) -> LabResultRead:
+    result = get_tenant_record(db, LabResult, result_id, context)
+    if not context.can_access_branch(result.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    technical_review(db, request, context, result, notes=payload.notes)
+    commit(db)
+    return lab_result_read(db, result)
+
+
+@router.post("/results/{result_id}/pathologist-validate", response_model=LabResultRead)
+def validate_lab_result(
+    result_id: uuid.UUID,
+    payload: LabResultNotes,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.validate"))],
+) -> LabResultRead:
+    result = get_tenant_record(db, LabResult, result_id, context)
+    if not context.can_access_branch(result.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    pathologist_validate(db, request, context, result, notes=payload.notes)
+    commit(db)
+    return lab_result_read(db, result)
+
+
+@router.post("/results/{result_id}/release", response_model=LabResultRead)
+def release_lab_result(
+    result_id: uuid.UUID,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.release"))],
+) -> LabResultRead:
+    result = get_tenant_record(db, LabResult, result_id, context)
+    if not context.can_access_branch(result.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    release_result(db, request, context, result)
+    commit(db)
+    return lab_result_read(db, result)
+
+
+@router.get("/results/{result_id}/pdf")
+def download_lab_result_pdf(
+    result_id: uuid.UUID,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("result.read"))],
+) -> Response:
+    result = get_tenant_record(db, LabResult, result_id, context)
+    if not context.can_access_branch(result.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    if result.status != "released":
+        raise HTTPException(status_code=409, detail="PDF is available only after release")
+    content = build_result_pdf(db, result)
+    filename = f"{result.report_number or result.id}.pdf"
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

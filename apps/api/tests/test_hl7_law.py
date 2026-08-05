@@ -69,3 +69,9 @@ def test_oru_detected_as_result() -> None:
     )
     assert is_result_message(oru) is True
     assert is_result_message(build_ack(ack_code="AA", message_control_id="1", text="ok")) is False
+    from app.hl7_law import extract_oru_observations
+
+    observations = extract_oru_observations(oru)
+    assert len(observations) == 1
+    assert observations[0]["observation_code"] == "ANDRO"
+    assert observations[0]["value"] == "1.8"

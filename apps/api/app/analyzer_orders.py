@@ -275,6 +275,7 @@ def process_order_attempt(
 
     ack_message: str | None = None
     result_message: str | None = None
+    result_message_id: uuid.UUID | None = None
     for inbound in inbound_messages:
         stored = store_message(
             db,
@@ -296,6 +297,7 @@ def process_order_attempt(
         if use_mllp or inbound.startswith("MSH|"):
             if is_result_message(inbound):
                 result_message = inbound
+                result_message_id = stored.id
             elif ack_message is None:
                 ack_message = inbound
 
@@ -358,6 +360,17 @@ def process_order_attempt(
         event_type = (
             "analyzer.order_result_received" if result_message else "analyzer.order_acknowledged"
         )
+        if result_message:
+            from app.results import normalize_worklist_result
+
+            normalize_worklist_result(
+                db,
+                request,
+                context,
+                worklist_item,
+                oru_body=result_message,
+                source_message_id=result_message_id,
+            )
 
     worklist_item.updated_by = context.user_id
     record_event(

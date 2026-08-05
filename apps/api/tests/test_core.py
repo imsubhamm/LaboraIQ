@@ -983,6 +983,7 @@ def test_hl7_law_order_requires_ack_and_stores_oru(
                 continue
             simulator.handle_connection(
                 connection,
+                peer="127.0.0.1:test",
                 analyzer_code="MAC-UAT-01",
                 expected_barcode=None,
                 expected_test_code="A4",
@@ -1068,7 +1069,7 @@ def test_hl7_law_order_requires_ack_and_stores_oru(
         assert attempt["state"] == "acknowledged"
         assert attempt["error"] is None
         item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
-        assert item["status"] == "result_received"
+        assert item["status"] == "normalized"
         rows = list(
             db.scalars(
                 select(AnalyzerMessage).where(
@@ -1079,6 +1080,32 @@ def test_hl7_law_order_requires_ack_and_stores_oru(
         assert any("OML^O33" in row.body for row in rows if row.direction == "outbound")
         assert any("MSA|AA|" in row.body for row in rows if row.direction == "inbound")
         assert any("ORU^R01" in row.body for row in rows if row.direction == "inbound")
+        results = client.get("/api/v1/results", params={"status": "pending_review"})
+        assert results.status_code == 200
+        assert results.json()["total"] >= 1
+        result = results.json()["items"][0]
+        assert result["observations"]
+        assert result["observations"][0]["machine_parameter_code"] == "ANDRO"
+        assert result["observations"][0]["value"] == "1.8"
+        reviewed = client.post(
+            f"/api/v1/results/{result['id']}/technical-review",
+            json={"notes": "Looks consistent"},
+        )
+        assert reviewed.status_code == 200
+        assert reviewed.json()["status"] == "technically_reviewed"
+        validated = client.post(
+            f"/api/v1/results/{result['id']}/pathologist-validate",
+            json={"notes": "Approved"},
+        )
+        assert validated.status_code == 200
+        released = client.post(f"/api/v1/results/{result['id']}/release")
+        assert released.status_code == 200
+        assert released.json()["status"] == "released"
+        assert released.json()["report_number"]
+        pdf = client.get(f"/api/v1/results/{result['id']}/pdf")
+        assert pdf.status_code == 200
+        assert pdf.headers["content-type"].startswith("application/pdf")
+        assert pdf.content[:4] == b"%PDF"
     finally:
         stop.set()
         server.close()
@@ -1117,6 +1144,7 @@ def test_hl7_law_nak_fails_attempt(
                 continue
             simulator.handle_connection(
                 connection,
+                peer="127.0.0.1:test",
                 analyzer_code="MAC-UAT-01",
                 expected_barcode=None,
                 expected_test_code="WRONG",

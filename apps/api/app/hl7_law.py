@@ -167,6 +167,28 @@ def is_result_message(message: str) -> bool:
     return msg_type.startswith("ORU")
 
 
+def extract_oru_observations(message: str) -> list[dict[str, str]]:
+    """Parse ORU OBX rows into plain observation dicts for result normalization."""
+    segments = segment_map(message)
+    barcode, _ = extract_order_fields(message)
+    observations: list[dict[str, str]] = []
+    for obx in segments.get("OBX", []):
+        identifier = field(obx, 3)
+        observations.append(
+            {
+                "sequence": field(obx, 1) or str(len(observations) + 1),
+                "value_type": field(obx, 2) or "ST",
+                "observation_code": component(identifier, 0),
+                "observation_name": component(identifier, 1) or component(identifier, 0),
+                "value": field(obx, 5),
+                "unit": field(obx, 6),
+                "abnormal_flags": field(obx, 8),
+                "barcode": barcode or "",
+            }
+        )
+    return observations
+
+
 def extract_order_fields(message: str) -> tuple[str | None, str | None]:
     """Return (barcode, machine_test_code) from a received OML/ORM order."""
     segments = segment_map(message)

@@ -65,6 +65,7 @@ def _parse_stub(payload: bytes) -> tuple[str | None, str | None, str]:
 def handle_connection(
     connection: socket.socket,
     *,
+    peer: str,
     analyzer_code: str,
     expected_barcode: str | None,
     expected_test_code: str | None,
@@ -74,9 +75,14 @@ def handle_connection(
     observation_code: str,
     timeout: float,
 ) -> None:
+    def show(label: str, body: str) -> None:
+        print(f"\n=== {label} ===", flush=True)
+        print(body.replace("\r", "\n"), flush=True)
+
     try:
         raw = _read_frame(connection, timeout=timeout)
         if not raw:
+            print(f"(empty payload from {peer})", flush=True)
             return
 
         messages = unwrap_mllp(raw)
@@ -86,9 +92,11 @@ def handle_connection(
             msh = segment_map(order).get("MSH", [""])[0]
             control_id = field(msh, 10) or "UNKNOWN"
             is_hl7 = True
+            show(f"inbound OML from {peer}", order)
         else:
             barcode, test_code, control_id = _parse_stub(raw)
             is_hl7 = False
+            show(f"inbound stub from {peer}", raw.decode("utf-8", errors="replace"))
 
         ack_code = "AA"
         ack_text = "Order accepted"
@@ -107,6 +115,7 @@ def handle_connection(
                 analyzer_code=analyzer_code,
             )
             connection.sendall(wrap_mllp(ack))
+            show(f"outbound ACK {ack_code}", ack)
             if ack_code == "AA" and send_result and barcode and test_code:
                 oru = build_oru_r01(
                     analyzer_code=analyzer_code,
@@ -120,9 +129,12 @@ def handle_connection(
                     message_control_id=f"R{control_id}"[:20],
                 )
                 connection.sendall(wrap_mllp(oru))
+                show("outbound ORU result", oru)
         else:
             # Stub path: plain ACK line for Phase 2 compatibility.
-            connection.sendall(f"ACK|{ack_code}|{ack_text}\n".encode())
+            stub_ack = f"ACK|{ack_code}|{ack_text}\n"
+            connection.sendall(stub_ack.encode())
+            show(f"outbound stub ACK {ack_code}", stub_ack)
     except OSError as error:
         print(f"connection error: {error}", file=sys.stderr)
     finally:
@@ -161,6 +173,7 @@ def main() -> None:
                 target=handle_connection,
                 kwargs={
                     "connection": connection,
+                    "peer": f"{address[0]}:{address[1]}",
                     "analyzer_code": args.analyzer_code,
                     "expected_barcode": args.expected_barcode,
                     "expected_test_code": args.expected_test_code,

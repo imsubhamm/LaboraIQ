@@ -30,13 +30,28 @@ PERMISSIONS = {
     "test_master.manage": "Manage and import the LIS/HIS test master",
     "analyzer.read": "View analyzer configurations",
     "analyzer.manage": "Manage analyzer configurations",
+    "result.read": "View laboratory results and reports",
+    "result.review": "Perform technical review of results",
+    "result.validate": "Pathologist validation of results",
+    "result.release": "Release validated laboratory reports",
 }
 
 ROLE_TEMPLATES = {
     "Platform Administrator": list(PERMISSIONS),
     "Laboratory Administrator": list(PERMISSIONS),
-    "Technician": ["branch.read"],
-    "Pathologist": ["branch.read"],
+    "Technician": [
+        "branch.read",
+        "analyzer.read",
+        "result.read",
+        "result.review",
+    ],
+    "Pathologist": [
+        "branch.read",
+        "analyzer.read",
+        "result.read",
+        "result.validate",
+        "result.release",
+    ],
     "Quality Manager": [
         "organization.read",
         "branch.read",
