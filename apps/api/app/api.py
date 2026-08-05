@@ -411,6 +411,8 @@ def probe_analyzer_connection(
     validate_private_analyzer_target(analyzer.host)
     tested_at = datetime.now(UTC)
     analyzer.last_connection_test_at = tested_at
+    # Do not hold a pooled DB connection across TCP probe waits/retries.
+    db.commit()
     final_success = False
     final_latency: int | None = None
     final_message = "Connection failed"

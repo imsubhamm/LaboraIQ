@@ -16,10 +16,12 @@ pool_options = (
     {}
     if settings.database_url.startswith("sqlite")
     else {
-        "pool_size": 5,
-        "max_overflow": 5,
-        "pool_timeout": 5,
-        "pool_recycle": 300,
+        # Analyzer TCP exchange can hold a request for several seconds; keep enough
+        # spare connections so list endpoints (patients, etc.) do not time out.
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+        "pool_timeout": settings.db_pool_timeout,
+        "pool_recycle": settings.db_pool_recycle,
         "pool_use_lifo": True,
     }
 )

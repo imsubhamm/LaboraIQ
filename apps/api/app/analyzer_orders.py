@@ -268,6 +268,8 @@ def process_order_attempt(
     )
     attempt.request_message_id = request_message.id
     attempt.payload_hash = request_message.payload_hash
+    # Release the pooled connection while waiting on analyzer TCP/MLLP.
+    db.commit()
 
     transport_ok, detail, inbound_messages = send_order_over_tcp(
         analyzer, payload, use_mllp=use_mllp
