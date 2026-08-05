@@ -70,6 +70,19 @@ export default function AnalyzerWorklistPage() {
     }
   }
 
+  async function normalize(id: string) {
+    try {
+      setBusyId(id);
+      setError("");
+      await api(`/analyzer-worklist/${id}/normalize-result`, { method: "POST", body: "{}" });
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to normalize result");
+    } finally {
+      setBusyId("");
+    }
+  }
+
   async function cancel(id: string) {
     try {
       setBusyId(id);
@@ -154,6 +167,8 @@ export default function AnalyzerWorklistPage() {
               <option value="in_flight">In flight</option>
               <option value="awaiting_result">Awaiting result</option>
               <option value="result_received">Result received</option>
+              <option value="normalized">Normalized</option>
+              <option value="released">Released</option>
               <option value="failed">Failed</option>
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>
@@ -224,6 +239,15 @@ export default function AnalyzerWorklistPage() {
                     <td>{new Date(item.created_at).toLocaleString()}</td>
                     <td>
                       <div className="analyzer-actions">
+                        {can("result.review") && item.status === "result_received" && (
+                            <button
+                              className="mapping-button"
+                              disabled={busyId === item.id}
+                              onClick={() => void normalize(item.id)}
+                            >
+                              Normalize
+                            </button>
+                          )}
                         {can("analyzer.manage") &&
                           (item.status === "pending" || item.status === "failed") && (
                             <button

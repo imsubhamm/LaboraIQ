@@ -376,6 +376,52 @@ class AnalyzerOrderProcessRead(APIModel):
     attempts: list[AnalyzerOrderAttemptRead]
 
 
+class LabResultObservationRead(APIModel):
+    id: uuid.UUID
+    sequence_no: int
+    parameter_id: uuid.UUID | None
+    machine_parameter_code: str
+    parameter_name: str
+    value: str
+    unit: str | None
+    reference_low: str | None
+    reference_high: str | None
+    reference_text: str | None
+    flag: str | None
+
+
+class LabResultRead(APIModel):
+    id: uuid.UUID
+    worklist_item_id: uuid.UUID
+    specimen_id: uuid.UUID
+    specimen_barcode: str
+    accession_number: str | None
+    order_id: uuid.UUID
+    order_number: str
+    patient_number: str
+    patient_name: str
+    test_id: uuid.UUID
+    lis_test_code: str
+    test_name: str
+    analyzer_id: uuid.UUID
+    analyzer_code: str
+    status: str
+    correlation_id: str
+    report_number: str | None
+    technical_reviewed_at: datetime | None
+    technical_review_notes: str | None
+    pathologist_validated_at: datetime | None
+    pathologist_notes: str | None
+    released_at: datetime | None
+    observations: list[LabResultObservationRead]
+    created_at: datetime
+    updated_at: datetime
+
+
+class LabResultNotes(APIModel):
+    notes: str | None = Field(default=None, max_length=500)
+
+
 class AnalyzerMappingStatusUpdate(APIModel):
     status: Status
 

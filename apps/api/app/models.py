@@ -395,6 +395,69 @@ class AnalyzerOrderAttempt(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
+class LabResult(Base, TimestampMixin):
+    """Normalized result set derived from an analyzer ORU (or equivalent)."""
+
+    __tablename__ = "lab_results"
+    __table_args__ = (
+        UniqueConstraint("worklist_item_id", name="uq_lab_result_worklist_item"),
+        Index("ix_lab_results_status_created", "organization_id", "status", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    worklist_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analyzer_worklist_items.id"), index=True
+    )
+    specimen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("specimens.id"), index=True)
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lab_orders.id"), index=True)
+    test_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("test_catalog_items.id"), index=True)
+    analyzer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analyzers.id"), index=True)
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("analyzer_messages.id"), index=True
+    )
+    correlation_id: Mapped[str] = mapped_column(String(100), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending_review", index=True)
+    technical_reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    technical_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    technical_review_notes: Mapped[str | None] = mapped_column(String(500))
+    pathologist_validated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    pathologist_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pathologist_notes: Mapped[str | None] = mapped_column(String(500))
+    released_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    report_number: Mapped[str | None] = mapped_column(String(40), index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    observations: Mapped[list["LabResultObservation"]] = relationship(
+        back_populates="result", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class LabResultObservation(Base, TimestampMixin):
+    __tablename__ = "lab_result_observations"
+    __table_args__ = (
+        UniqueConstraint("result_id", "sequence_no", name="uq_result_observation_sequence"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    result_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("lab_results.id", ondelete="CASCADE"), index=True
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer)
+    parameter_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("test_catalog_parameters.id"), index=True
+    )
+    machine_parameter_code: Mapped[str] = mapped_column(String(100))
+    parameter_name: Mapped[str] = mapped_column(String(200))
+    value: Mapped[str] = mapped_column(String(200))
+    unit: Mapped[str | None] = mapped_column(String(40))
+    reference_low: Mapped[str | None] = mapped_column(String(40))
+    reference_high: Mapped[str | None] = mapped_column(String(40))
+    reference_text: Mapped[str | None] = mapped_column(String(200))
+    flag: Mapped[str | None] = mapped_column(String(20))
+    raw_obx: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[LabResult] = relationship(back_populates="observations")
+
+
 class LabOrder(Base, TimestampMixin):
     __tablename__ = "lab_orders"
     __table_args__ = (UniqueConstraint("organization_id", "order_number", name="uq_order_number"),)

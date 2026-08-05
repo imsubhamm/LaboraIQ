@@ -57,6 +57,10 @@ def context(db: Session) -> AuthContext:
                 "test_master.manage",
                 "analyzer.read",
                 "analyzer.manage",
+                "result.read",
+                "result.review",
+                "result.validate",
+                "result.release",
             }
         ),
         is_organization_scoped=True,

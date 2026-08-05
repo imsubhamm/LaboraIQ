@@ -94,7 +94,13 @@ Do not commit SSH keys, Tailscale auth keys, passwords, cookies, tokens, or `.en
 - Application ACK is required: MSA `AA`/`CA` → attempt `acknowledged`; `AE`/`AR` → `failed` (with retries).
 - Worklist moves to `awaiting_result` on ACK-only, or `result_received` when a follow-up `ORU^R01` is stored raw.
 - Mac simulator (`tools/analyzer_tcp_simulator.py`) validates optional barcode/test code, returns ACK, and can emit a synthetic Androstenedione ORU.
-- Result normalization, review, release, and PDF remain Phase 4.
+
+### Results review and PDF (Phase 4)
+
+- ORU messages are normalized into `lab_results` / `lab_result_observations` (auto on successful order process).
+- Status flow: `pending_review` → `technically_reviewed` → `pathologist_validated` → `released`.
+- UI at `/results` supports review, pathologist validate, release, and PDF download.
+- Existing `result_received` worklist items can be normalized via `POST /analyzer-worklist/{id}/normalize-result`.
 
 ## Current UAT state
 
@@ -116,9 +122,9 @@ There is also an incorrect UAT mapping of `BIO0231 -> A4` on the Sysmex XN-1000 
 
 1. Connection test success means TCP reachability only.
 2. For `HL7_LAW`, “acknowledged” means MSA AA/CA over MLLP, not clinical result acceptance.
-3. Raw ORU messages are stored; there is no normalized result model yet.
-4. There is no technical validation, pathologist validation, report release, or result PDF.
-5. BIO0231 now has an Androstenedione parameter (`ANDRO`, unit `ng/mL`); reference limits remain pending clinical approval.
+3. Normalized results support technical review → pathologist validation → release → PDF.
+4. Reference ranges/flags only apply when present on the test parameter; missing ranges stay unflagged.
+5. BIO0231 Androstenedione parameter (`ANDRO`, unit `ng/mL`); reference limits remain pending clinical approval.
 6. Most imported tests still need specimen/container and price review.
 7. Analyzer overlay allowlisting is configured via `ANALYZER_OVERLAY_TARGETS`.
 8. Production still uses development authentication headers and requires a production identity provider/security hardening before real patient use.
@@ -134,9 +140,11 @@ Build the analytical workflow in this order:
 5. ~~Add persistent order attempts, correlation IDs, payload hashes, retries, and immutable message store.~~
 6. ~~Implement HL7 v2.5.1/IHE LAW UAT protocol (OML^O33 / ACK / ORU over MLLP).~~
 7. ~~Upgrade the Mac simulator to receive an order, validate barcode/test code, send ACK, and return a test result.~~
-8. ~~Store raw inbound/outbound HL7 messages (normalization still pending).~~
-9. Add result normalization by analyzer mapping, including units and flags.
-10. Add technical review, pathologist validation, report release, and PDF output.
+8. ~~Store raw inbound/outbound HL7 messages.~~
+9. ~~Add result normalization by analyzer mapping, including units and flags.~~
+10. ~~Add technical review, pathologist validation, report release, and PDF output.~~
+
+Remaining: production OIDC/auth hardening, clinical reference range approval, and broader instrument adapters.
 
 ## Recommended message flow for the next UAT
 
