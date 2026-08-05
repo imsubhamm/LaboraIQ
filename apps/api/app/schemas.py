@@ -290,6 +290,60 @@ class TestParameterRead(APIModel):
     name: str
     external_code: str
     display_order: int
+    unit: str | None = None
+    reference_low: str | None = None
+    reference_high: str | None = None
+    reference_text: str | None = None
+
+
+class TestParameterCreate(APIModel):
+    name: str = Field(min_length=1, max_length=200)
+    external_code: str = Field(min_length=1, max_length=255)
+    display_order: int = Field(default=0, ge=0)
+    unit: str | None = Field(default=None, max_length=40)
+    reference_low: str | None = Field(default=None, max_length=40)
+    reference_high: str | None = Field(default=None, max_length=40)
+    reference_text: str | None = Field(default=None, max_length=200)
+
+
+class TestParameterUpdate(APIModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    external_code: str | None = Field(default=None, min_length=1, max_length=255)
+    display_order: int | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, max_length=40)
+    reference_low: str | None = Field(default=None, max_length=40)
+    reference_high: str | None = Field(default=None, max_length=40)
+    reference_text: str | None = Field(default=None, max_length=200)
+
+
+class AnalyzerWorklistRead(APIModel):
+    id: uuid.UUID
+    specimen_id: uuid.UUID
+    specimen_barcode: str
+    accession_number: str | None
+    order_id: uuid.UUID
+    order_number: str
+    test_id: uuid.UUID
+    lis_test_code: str
+    test_name: str
+    analyzer_id: uuid.UUID
+    analyzer_code: str
+    analyzer_name: str
+    mapping_id: uuid.UUID
+    machine_test_code: str
+    status: str
+    correlation_id: str
+    cancelled_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalyzerWorklistCancel(APIModel):
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class AnalyzerMappingStatusUpdate(APIModel):
+    status: Status
 
 
 class TestMasterCreate(APIModel):

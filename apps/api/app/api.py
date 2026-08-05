@@ -24,12 +24,14 @@ from sqlalchemy.orm import Session
 
 from app.audit import record_event
 from app.auth import AuthContext, require_permission
+from app.config import get_settings
 from app.database import get_db
 from app.models import (
     Analyzer,
     AnalyzerConnectionEvent,
     AnalyzerParameterMapping,
     AnalyzerTestMapping,
+    AnalyzerWorklistItem,
     AuditEvent,
     Branch,
     Department,
@@ -42,6 +44,7 @@ from app.models import (
     Permission,
     Role,
     Specimen,
+    Status,
     TestCatalogItem,
     TestCatalogParameter,
     User,
@@ -51,10 +54,13 @@ from app.schemas import (
     AnalyzerConnectionEventRead,
     AnalyzerConnectionTestRead,
     AnalyzerCreate,
+    AnalyzerMappingStatusUpdate,
     AnalyzerRead,
     AnalyzerTestMappingCreate,
     AnalyzerTestMappingRead,
     AnalyzerUpdate,
+    AnalyzerWorklistCancel,
+    AnalyzerWorklistRead,
     AssignmentCreate,
     AssignmentRead,
     AuditEventRead,
@@ -85,6 +91,9 @@ from app.schemas import (
     TestMasterCreate,
     TestMasterImportRead,
     TestMasterRead,
+    TestParameterCreate,
+    TestParameterRead,
+    TestParameterUpdate,
     UserCreate,
     UserRead,
     UserUpdate,
@@ -93,7 +102,16 @@ from app.schemas import (
 router = APIRouter()
 Db = Annotated[Session, Depends(get_db)]
 ModelT = TypeVar("ModelT")
-APPROVED_ANALYZER_OVERLAY_TARGETS = {ipaddress.ip_address("100.122.201.68")}
+
+
+def approved_analyzer_overlay_targets() -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    targets: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for value in get_settings().analyzer_overlay_targets:
+        try:
+            targets.add(ipaddress.ip_address(value))
+        except ValueError:
+            continue
+    return targets
 
 
 def page(db: Session, statement: Any, model: type[ModelT], limit: int, offset: int) -> Page[ModelT]:
@@ -144,9 +162,19 @@ def snapshot(record: Any, keys: list[str]) -> dict[str, Any]:
 
 
 ANALYZER_FIELDS = [
-    "branch_id", "code", "vendor", "model", "protocol", "host", "port",
-    "connection_mode", "connection_timeout_seconds", "retry_limit",
-    "heartbeat_interval_seconds", "connection_status", "status",
+    "branch_id",
+    "code",
+    "vendor",
+    "model",
+    "protocol",
+    "host",
+    "port",
+    "connection_mode",
+    "connection_timeout_seconds",
+    "retry_limit",
+    "heartbeat_interval_seconds",
+    "connection_status",
+    "status",
 ]
 
 
@@ -196,9 +224,14 @@ def create_analyzer(
     db.add(analyzer)
     flush(db)
     record_event(
-        db, request, context,
-        event_type="analyzer.created", entity_type="analyzer", entity_id=analyzer.id,
-        branch_id=analyzer.branch_id, action="create",
+        db,
+        request,
+        context,
+        event_type="analyzer.created",
+        entity_type="analyzer",
+        entity_id=analyzer.id,
+        branch_id=analyzer.branch_id,
+        action="create",
         new=snapshot(analyzer, ANALYZER_FIELDS),
     )
     commit(db)
@@ -225,18 +258,22 @@ def update_analyzer(
         analyzer.last_connection_error = None
     analyzer.updated_by = context.user_id
     record_event(
-        db, request, context,
-        event_type="analyzer.updated", entity_type="analyzer", entity_id=analyzer.id,
-        branch_id=analyzer.branch_id, action="update", previous=previous,
+        db,
+        request,
+        context,
+        event_type="analyzer.updated",
+        entity_type="analyzer",
+        entity_id=analyzer.id,
+        branch_id=analyzer.branch_id,
+        action="update",
+        previous=previous,
         new=snapshot(analyzer, ANALYZER_FIELDS),
     )
     commit(db)
     return analyzer
 
 
-def get_accessible_analyzer(
-    db: Session, analyzer_id: uuid.UUID, context: AuthContext
-) -> Analyzer:
+def get_accessible_analyzer(db: Session, analyzer_id: uuid.UUID, context: AuthContext) -> Analyzer:
     analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
     if not context.can_access_branch(analyzer.branch_id):
         raise HTTPException(status_code=403, detail="Branch access denied")
@@ -246,7 +283,7 @@ def get_accessible_analyzer(
 def validate_private_analyzer_target(host: str) -> None:
     address = ipaddress.ip_address(host)
     is_approved_private_target = (
-        address.is_private or address in APPROVED_ANALYZER_OVERLAY_TARGETS
+        address.is_private or address in approved_analyzer_overlay_targets()
     )
     if (
         not is_approved_private_target
@@ -336,9 +373,7 @@ def probe_analyzer_connection(
     )
 
 
-@router.post(
-    "/analyzers/{analyzer_id}/connection-test", response_model=AnalyzerConnectionTestRead
-)
+@router.post("/analyzers/{analyzer_id}/connection-test", response_model=AnalyzerConnectionTestRead)
 def test_analyzer_connection(
     analyzer_id: uuid.UUID,
     request: Request,
@@ -349,9 +384,7 @@ def test_analyzer_connection(
     return probe_analyzer_connection(analyzer, request, db, context, "connection_test")
 
 
-@router.post(
-    "/analyzers/{analyzer_id}/heartbeat", response_model=AnalyzerConnectionTestRead
-)
+@router.post("/analyzers/{analyzer_id}/heartbeat", response_model=AnalyzerConnectionTestRead)
 def heartbeat_analyzer(
     analyzer_id: uuid.UUID,
     request: Request,
@@ -383,9 +416,7 @@ def list_analyzer_connection_events(
     )
 
 
-def analyzer_mapping_read(
-    db: Session, mapping: AnalyzerTestMapping
-) -> AnalyzerTestMappingRead:
+def analyzer_mapping_read(db: Session, mapping: AnalyzerTestMapping) -> AnalyzerTestMappingRead:
     test = db.get(TestCatalogItem, mapping.test_id)
     parameter_ids = [item.parameter_id for item in mapping.parameters]
     catalog_parameters = {
@@ -419,9 +450,7 @@ def analyzer_mapping_read(
     )
 
 
-@router.get(
-    "/analyzers/{analyzer_id}/mappings", response_model=list[AnalyzerTestMappingRead]
-)
+@router.get("/analyzers/{analyzer_id}/mappings", response_model=list[AnalyzerTestMappingRead])
 def list_analyzer_mappings(
     analyzer_id: uuid.UUID,
     db: Db,
@@ -483,6 +512,7 @@ def save_analyzer_mapping(
             "parameter_count": len(mapping.parameters),
         }
         mapping.machine_test_code = payload.machine_test_code.strip().upper()
+        mapping.status = Status.active
         mapping.updated_by = context.user_id
         mapping.parameters.clear()
         flush(db)
@@ -495,6 +525,7 @@ def save_analyzer_mapping(
             analyzer_id=analyzer.id,
             test_id=test.id,
             machine_test_code=payload.machine_test_code.strip().upper(),
+            status=Status.active,
             created_by=context.user_id,
             updated_by=context.user_id,
         )
@@ -525,6 +556,93 @@ def save_analyzer_mapping(
             "machine_test_code": mapping.machine_test_code,
             "parameter_count": len(mapping.parameters),
         },
+    )
+    commit(db)
+    return analyzer_mapping_read(db, mapping)
+
+
+@router.delete("/analyzers/{analyzer_id}/mappings/{mapping_id}", status_code=204)
+def delete_analyzer_mapping(
+    analyzer_id: uuid.UUID,
+    mapping_id: uuid.UUID,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> Response:
+    analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
+    if not context.can_access_branch(analyzer.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    mapping = db.scalar(
+        select(AnalyzerTestMapping).where(
+            AnalyzerTestMapping.id == mapping_id,
+            AnalyzerTestMapping.analyzer_id == analyzer.id,
+            AnalyzerTestMapping.organization_id == context.organization_id,
+        )
+    )
+    if mapping is None:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    test = db.get(TestCatalogItem, mapping.test_id)
+    previous = {
+        "lis_test_code": test.code if test else None,
+        "machine_test_code": mapping.machine_test_code,
+        "status": mapping.status.value if hasattr(mapping.status, "value") else mapping.status,
+    }
+    record_event(
+        db,
+        request,
+        context,
+        event_type="analyzer.mapping_deleted",
+        entity_type="analyzer_test_mapping",
+        entity_id=mapping.id,
+        branch_id=analyzer.branch_id,
+        action="delete",
+        previous=previous,
+    )
+    db.delete(mapping)
+    commit(db)
+    return Response(status_code=204)
+
+
+@router.patch(
+    "/analyzers/{analyzer_id}/mappings/{mapping_id}",
+    response_model=AnalyzerTestMappingRead,
+)
+def update_analyzer_mapping_status(
+    analyzer_id: uuid.UUID,
+    mapping_id: uuid.UUID,
+    payload: AnalyzerMappingStatusUpdate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> AnalyzerTestMappingRead:
+    analyzer = get_tenant_record(db, Analyzer, analyzer_id, context)
+    if not context.can_access_branch(analyzer.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    mapping = db.scalar(
+        select(AnalyzerTestMapping).where(
+            AnalyzerTestMapping.id == mapping_id,
+            AnalyzerTestMapping.analyzer_id == analyzer.id,
+            AnalyzerTestMapping.organization_id == context.organization_id,
+        )
+    )
+    if mapping is None:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    previous = {
+        "status": mapping.status.value if hasattr(mapping.status, "value") else mapping.status
+    }
+    mapping.status = payload.status
+    mapping.updated_by = context.user_id
+    record_event(
+        db,
+        request,
+        context,
+        event_type="analyzer.mapping_status_updated",
+        entity_type="analyzer_test_mapping",
+        entity_id=mapping.id,
+        branch_id=analyzer.branch_id,
+        action="update",
+        previous=previous,
+        new={"status": payload.status.value},
     )
     commit(db)
     return analyzer_mapping_read(db, mapping)
@@ -1104,6 +1222,104 @@ def create_test_master_item(
     )
     commit(db)
     return item
+
+
+@router.post(
+    "/test-master/{test_id}/parameters",
+    response_model=TestParameterRead,
+    status_code=201,
+)
+def create_test_parameter(
+    test_id: uuid.UUID,
+    payload: TestParameterCreate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("test_master.manage"))],
+) -> TestCatalogParameter:
+    test = get_tenant_record(db, TestCatalogItem, test_id, context)
+    parameter = TestCatalogParameter(
+        test_id=test.id,
+        name=payload.name.strip(),
+        external_code=payload.external_code.strip().upper(),
+        display_order=payload.display_order,
+        unit=payload.unit.strip() if payload.unit else None,
+        reference_low=payload.reference_low.strip() if payload.reference_low else None,
+        reference_high=payload.reference_high.strip() if payload.reference_high else None,
+        reference_text=payload.reference_text.strip() if payload.reference_text else None,
+    )
+    test.parameters.append(parameter)
+    test.is_panel = True
+    has_reference = bool(
+        parameter.reference_low or parameter.reference_high or parameter.reference_text
+    )
+    if not has_reference:
+        test.validation_status = "needs_review"
+    flush(db)
+    record_event(
+        db,
+        request,
+        context,
+        event_type="test_master.parameter_created",
+        entity_type="test_catalog_parameter",
+        entity_id=parameter.id,
+        action="create",
+        new=payload.model_dump(mode="json"),
+    )
+    commit(db)
+    return parameter
+
+
+@router.patch(
+    "/test-master/{test_id}/parameters/{parameter_id}",
+    response_model=TestParameterRead,
+)
+def update_test_parameter(
+    test_id: uuid.UUID,
+    parameter_id: uuid.UUID,
+    payload: TestParameterUpdate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("test_master.manage"))],
+) -> TestCatalogParameter:
+    test = get_tenant_record(db, TestCatalogItem, test_id, context)
+    parameter = db.scalar(
+        select(TestCatalogParameter).where(
+            TestCatalogParameter.id == parameter_id,
+            TestCatalogParameter.test_id == test.id,
+        )
+    )
+    if parameter is None:
+        raise HTTPException(status_code=404, detail="Parameter not found")
+    previous = {
+        "name": parameter.name,
+        "external_code": parameter.external_code,
+        "unit": parameter.unit,
+        "reference_low": parameter.reference_low,
+        "reference_high": parameter.reference_high,
+        "reference_text": parameter.reference_text,
+    }
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        if isinstance(value, str):
+            value = value.strip()
+            if key == "external_code":
+                value = value.upper()
+            if value == "":
+                value = None
+        setattr(parameter, key, value)
+    record_event(
+        db,
+        request,
+        context,
+        event_type="test_master.parameter_updated",
+        entity_type="test_catalog_parameter",
+        entity_id=parameter.id,
+        action="update",
+        previous=previous,
+        new=data,
+    )
+    commit(db)
+    return parameter
 
 
 @router.post("/test-master/import", response_model=TestMasterImportRead)
@@ -1908,6 +2124,9 @@ def review_specimen(
             order.status = "recollection_required"
         elif statuses == {"accepted"}:
             order.status = "ready_for_processing"
+    worklist_created = 0
+    if payload.decision == "accept":
+        worklist_created = enqueue_analyzer_worklist_for_specimen(db, request, context, specimen)
     record_event(
         db,
         request,
@@ -1918,7 +2137,241 @@ def review_specimen(
         branch_id=specimen.branch_id,
         action=payload.decision,
         previous={"status": "received"},
-        new={"status": specimen.status, **payload.model_dump()},
+        new={
+            "status": specimen.status,
+            "worklist_items_created": worklist_created,
+            **payload.model_dump(),
+        },
     )
     commit(db)
     return specimen_workflow_read(db, specimen)
+
+
+def enqueue_analyzer_worklist_for_specimen(
+    db: Session,
+    request: Request,
+    context: AuthContext,
+    specimen: Specimen,
+) -> int:
+    order_tests = list(
+        db.scalars(select(OrderTest).where(OrderTest.order_id == specimen.order_id)).all()
+    )
+    if not order_tests:
+        return 0
+    test_ids = [item.test_id for item in order_tests]
+    mappings = list(
+        db.scalars(
+            select(AnalyzerTestMapping)
+            .join(Analyzer, Analyzer.id == AnalyzerTestMapping.analyzer_id)
+            .where(
+                AnalyzerTestMapping.organization_id == context.organization_id,
+                AnalyzerTestMapping.test_id.in_(test_ids),
+                AnalyzerTestMapping.status == Status.active,
+                Analyzer.organization_id == context.organization_id,
+                Analyzer.branch_id == specimen.branch_id,
+                Analyzer.status == Status.active,
+            )
+        ).all()
+    )
+    created = 0
+    for mapping in mappings:
+        existing = db.scalar(
+            select(AnalyzerWorklistItem).where(
+                AnalyzerWorklistItem.specimen_id == specimen.id,
+                AnalyzerWorklistItem.analyzer_id == mapping.analyzer_id,
+                AnalyzerWorklistItem.test_id == mapping.test_id,
+            )
+        )
+        if existing:
+            if existing.status == "cancelled":
+                existing.status = "pending"
+                existing.cancelled_reason = None
+                existing.mapping_id = mapping.id
+                existing.machine_test_code = mapping.machine_test_code
+                existing.updated_by = context.user_id
+                existing.correlation_id = request.state.correlation_id
+                created += 1
+            continue
+        item = AnalyzerWorklistItem(
+            organization_id=context.organization_id,
+            branch_id=specimen.branch_id,
+            specimen_id=specimen.id,
+            order_id=specimen.order_id,
+            test_id=mapping.test_id,
+            analyzer_id=mapping.analyzer_id,
+            mapping_id=mapping.id,
+            machine_test_code=mapping.machine_test_code,
+            status="pending",
+            correlation_id=request.state.correlation_id,
+            created_by=context.user_id,
+            updated_by=context.user_id,
+        )
+        db.add(item)
+        flush(db)
+        record_event(
+            db,
+            request,
+            context,
+            event_type="analyzer.worklist_created",
+            entity_type="analyzer_worklist_item",
+            entity_id=item.id,
+            branch_id=specimen.branch_id,
+            action="create",
+            new={
+                "specimen_id": str(specimen.id),
+                "analyzer_id": str(mapping.analyzer_id),
+                "test_id": str(mapping.test_id),
+                "machine_test_code": mapping.machine_test_code,
+                "status": "pending",
+            },
+        )
+        created += 1
+    return created
+
+
+def worklist_item_read(db: Session, item: AnalyzerWorklistItem) -> AnalyzerWorklistRead:
+    specimen = db.get(Specimen, item.specimen_id)
+    order = db.get(LabOrder, item.order_id)
+    test = db.get(TestCatalogItem, item.test_id)
+    analyzer = db.get(Analyzer, item.analyzer_id)
+    return AnalyzerWorklistRead(
+        id=item.id,
+        specimen_id=item.specimen_id,
+        specimen_barcode=specimen.barcode if specimen else "Unknown",
+        accession_number=specimen.accession_number if specimen else None,
+        order_id=item.order_id,
+        order_number=order.order_number if order else "Unknown",
+        test_id=item.test_id,
+        lis_test_code=test.code if test else "Unknown",
+        test_name=test.name if test else "Unknown test",
+        analyzer_id=item.analyzer_id,
+        analyzer_code=analyzer.code if analyzer else "Unknown",
+        analyzer_name=(f"{analyzer.vendor} {analyzer.model}" if analyzer else "Unknown analyzer"),
+        mapping_id=item.mapping_id,
+        machine_test_code=item.machine_test_code,
+        status=item.status,
+        correlation_id=item.correlation_id,
+        cancelled_reason=item.cancelled_reason,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+@router.get("/analyzer-worklist", response_model=Page[AnalyzerWorklistRead])
+def list_analyzer_worklist(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status_filter: Annotated[str | None, Query(alias="status", max_length=30)] = None,
+    analyzer_id: uuid.UUID | None = None,
+) -> Page[AnalyzerWorklistRead]:
+    filters = [AnalyzerWorklistItem.organization_id == context.organization_id]
+    if not context.is_organization_scoped:
+        filters.append(AnalyzerWorklistItem.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
+    if status_filter:
+        filters.append(AnalyzerWorklistItem.status == status_filter.strip().lower())
+    if analyzer_id:
+        filters.append(AnalyzerWorklistItem.analyzer_id == analyzer_id)
+    rows = db.execute(
+        select(
+            AnalyzerWorklistItem,
+            func.count(AnalyzerWorklistItem.id).over().label("total_count"),
+        )
+        .where(*filters)
+        .order_by(AnalyzerWorklistItem.created_at.desc(), AnalyzerWorklistItem.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    total = rows[0].total_count if rows else 0
+    if not rows and offset:
+        total = db.scalar(select(func.count(AnalyzerWorklistItem.id)).where(*filters)) or 0
+    items = [worklist_item_read(db, item) for item, _ in rows]
+    return Page[AnalyzerWorklistRead](items=items, total=total, limit=limit, offset=offset)
+
+
+@router.post(
+    "/analyzer-worklist/{item_id}/enqueue",
+    response_model=AnalyzerWorklistRead,
+)
+def enqueue_analyzer_worklist_item(
+    item_id: uuid.UUID,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> AnalyzerWorklistRead:
+    item = db.scalar(
+        select(AnalyzerWorklistItem).where(
+            AnalyzerWorklistItem.id == item_id,
+            AnalyzerWorklistItem.organization_id == context.organization_id,
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Worklist item not found")
+    if not context.can_access_branch(item.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    if item.status not in {"pending", "failed"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Only pending or failed worklist items can be enqueued",
+        )
+    previous = {"status": item.status}
+    item.status = "queued"
+    item.updated_by = context.user_id
+    record_event(
+        db,
+        request,
+        context,
+        event_type="analyzer.worklist_enqueued",
+        entity_type="analyzer_worklist_item",
+        entity_id=item.id,
+        branch_id=item.branch_id,
+        action="enqueue",
+        previous=previous,
+        new={"status": "queued"},
+    )
+    commit(db)
+    return worklist_item_read(db, item)
+
+
+@router.post(
+    "/analyzer-worklist/{item_id}/cancel",
+    response_model=AnalyzerWorklistRead,
+)
+def cancel_analyzer_worklist_item(
+    item_id: uuid.UUID,
+    payload: AnalyzerWorklistCancel,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> AnalyzerWorklistRead:
+    item = db.scalar(
+        select(AnalyzerWorklistItem).where(
+            AnalyzerWorklistItem.id == item_id,
+            AnalyzerWorklistItem.organization_id == context.organization_id,
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Worklist item not found")
+    if not context.can_access_branch(item.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    if item.status in {"completed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Worklist item is already closed")
+    previous = {"status": item.status}
+    item.status = "cancelled"
+    item.cancelled_reason = payload.reason.strip() if payload.reason else None
+    item.updated_by = context.user_id
+    record_event(
+        db,
+        request,
+        context,
+        event_type="analyzer.worklist_cancelled",
+        entity_type="analyzer_worklist_item",
+        entity_id=item.id,
+        branch_id=item.branch_id,
+        action="cancel",
+        previous=previous,
+        new={"status": "cancelled", "reason": item.cancelled_reason},
+    )
+    commit(db)
+    return worklist_item_read(db, item)

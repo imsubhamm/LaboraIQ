@@ -8,6 +8,7 @@ from app.config import Settings
 from app.main import app
 from app.models import (
     AnalyzerConnectionEvent,
+    AnalyzerWorklistItem,
     AuditEvent,
     Branch,
     LabOrder,
@@ -455,9 +456,7 @@ def test_analyzer_test_and_parameter_mapping_can_be_created_and_updated(
     assert listing.status_code == 200
     assert len(listing.json()) == 1
     assert listing.json()[0]["machine_test_code"] == "CBC"
-    assert db.scalar(
-        select(AuditEvent).where(AuditEvent.event_type == "analyzer.mapping_updated")
-    )
+    assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "analyzer.mapping_updated"))
 
 
 def test_analyzer_connection_test_retries_updates_status_and_logs_events(
@@ -578,3 +577,175 @@ def test_analyzer_connection_test_allows_tailscale_target(
     response = client.post(f"/api/v1/analyzers/{analyzer['id']}/connection-test")
     assert response.status_code == 200
     assert response.json()["success"] is True
+
+
+def test_analyzer_mapping_can_be_deactivated_and_deleted(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add_all([branch, test])
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "HEM-01",
+            "vendor": "Sysmex",
+            "model": "XN-1000",
+            "protocol": "ASTM",
+            "host": "192.168.10.50",
+            "port": 5000,
+            "connection_mode": "bidirectional",
+        },
+    ).json()
+    created = client.post(
+        f"/api/v1/analyzers/{analyzer['id']}/mappings",
+        json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+    )
+    assert created.status_code == 201
+    mapping_id = created.json()["id"]
+    deactivated = client.patch(
+        f"/api/v1/analyzers/{analyzer['id']}/mappings/{mapping_id}",
+        json={"status": "inactive"},
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["status"] == "inactive"
+    deleted = client.delete(f"/api/v1/analyzers/{analyzer['id']}/mappings/{mapping_id}")
+    assert deleted.status_code == 204
+    listing = client.get(f"/api/v1/analyzers/{analyzer['id']}/mappings")
+    assert listing.status_code == 200
+    assert listing.json() == []
+
+
+def test_test_parameter_can_be_created_and_updated(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add(test)
+    db.commit()
+    created = client.post(
+        f"/api/v1/test-master/{test.id}/parameters",
+        json={
+            "name": "Androstenedione",
+            "external_code": "andro",
+            "display_order": 1,
+            "unit": "ng/mL",
+            "reference_text": "Reference range pending clinical approval",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["external_code"] == "ANDRO"
+    assert created.json()["unit"] == "ng/mL"
+    parameter_id = created.json()["id"]
+    updated = client.patch(
+        f"/api/v1/test-master/{test.id}/parameters/{parameter_id}",
+        json={"reference_low": "0.3", "reference_high": "3.5"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["reference_low"] == "0.3"
+    assert updated.json()["reference_high"] == "3.5"
+
+
+def test_accepting_specimen_creates_analyzer_worklist_item(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add_all([branch, test])
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "MAC-UAT-01",
+            "vendor": "LaboraIQ",
+            "model": "Mac Simulator",
+            "protocol": "HL7_LAW",
+            "host": "192.168.10.80",
+            "port": 55001,
+            "connection_mode": "bidirectional",
+        },
+    ).json()
+    mapped = client.post(
+        f"/api/v1/analyzers/{analyzer['id']}/mappings",
+        json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+    )
+    assert mapped.status_code == 201
+
+    intake = client.post(
+        "/api/v1/intake-workflows",
+        json={
+            "full_name": "Worklist Patient",
+            "phone": "+919811122233",
+            "email": "worklist@example.com",
+            "age_years": 30,
+            "sex": "Female",
+            "blood_group": "A+",
+            "country": "India",
+            "race": "Asian",
+            "nationality": "Indian",
+            "visit_type": "OP",
+            "department": "Medicine",
+            "ward": "OP Clinic",
+            "doctor_name": "Dr Example",
+            "diagnosis": "Z00.0",
+            "test_ids": [str(test.id)],
+        },
+    )
+    assert intake.status_code == 201
+    payment = client.post(
+        f"/api/v1/orders/{intake.json()['order_id']}/payment",
+        json={"payment_method": "CASH"},
+    )
+    assert payment.status_code == 200
+    barcode = payment.json()["specimens"][0]["barcode"]
+    collected = client.post(
+        f"/api/v1/specimens/{barcode}/collect",
+        json={"collection_location": "OP", "container_count": 1},
+    )
+    assert collected.status_code == 200
+    assert client.post(f"/api/v1/specimens/{barcode}/receive").status_code == 200
+    accepted = client.post(
+        f"/api/v1/specimens/{barcode}/decision",
+        json={"decision": "accept"},
+    )
+    assert accepted.status_code == 200
+    assert db.query(AnalyzerWorklistItem).count() == 1
+    worklist = client.get("/api/v1/analyzer-worklist", params={"status": "pending"})
+    assert worklist.status_code == 200
+    assert worklist.json()["total"] == 1
+    item = worklist.json()["items"][0]
+    assert item["lis_test_code"] == "BIO0231"
+    assert item["machine_test_code"] == "A4"
+    assert item["analyzer_code"] == "MAC-UAT-01"
+    enqueued = client.post(f"/api/v1/analyzer-worklist/{item['id']}/enqueue")
+    assert enqueued.status_code == 200
+    assert enqueued.json()["status"] == "queued"
+    cancelled = client.post(
+        f"/api/v1/analyzer-worklist/{item['id']}/cancel",
+        json={"reason": "UAT stop"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"

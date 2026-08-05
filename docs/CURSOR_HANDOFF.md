@@ -68,10 +68,18 @@ Do not commit SSH keys, Tailscale auth keys, passwords, cookies, tokens, or `.en
 - Configure analyzer vendor, model, code, protocol, host, port, mode, timeout, retry count, and heartbeat interval.
 - Map LIS tests to analyzer-specific test codes.
 - Map individual LIS parameters to analyzer parameter codes and units when the test master contains parameters.
+- Deactivate or delete analyzer test mappings (including cleanup of incorrect Sysmex BIO0231→A4).
 - Search the full test catalogue by code or name in the mapping dialog.
 - Test TCP connections with retries and event logging.
 - Run manual heartbeat probes.
-- Outbound analyzer probes are restricted to private addresses and the explicitly approved Tailscale Mac address.
+- Outbound analyzer probes are restricted to private addresses plus `ANALYZER_OVERLAY_TARGETS` (Tailscale allowlist).
+
+### Analyzer worklist
+
+- Accepting a specimen creates pending worklist items for ordered tests with active mappings on active branch analyzers.
+- List/filter worklist, enqueue to `queued`, and cancel items.
+- UI available at `/analyzers/worklist`.
+- Order transmission / HL7 ACK is not implemented yet (Phase 2–3).
 
 ## Current UAT state
 
@@ -93,23 +101,22 @@ There is also an incorrect UAT mapping of `BIO0231 -> A4` on the Sysmex XN-1000 
 
 1. The TCP simulator only accepts and closes connections. It does not parse or acknowledge analyzer messages.
 2. `Connected` currently means TCP reachability only, not successful HL7/ASTM application-level communication.
-3. There is no accepted-specimen analyzer worklist.
-4. There is no analyzer order transmission queue.
-5. There is no HL7/ASTM message framing, ACK/NAK handling, or result ingestion.
-6. There is no result model, technical validation, pathologist validation, report release, or result PDF.
-7. `BIO0231` has zero parameters in the imported test master. Add an Androstenedione result parameter, unit, reference range, and critical rules before clinical use.
-8. Most imported tests still need specimen/container and price review.
-9. Analyzer egress allowlisting currently contains the Mac Tailscale address in API code. Move this to validated environment configuration before supporting more analyzers.
-10. Production still uses development authentication headers and requires a production identity provider/security hardening before real patient use.
+3. Worklist items can be queued, but there is no analyzer order transmission worker yet.
+4. There is no HL7/ASTM message framing, ACK/NAK handling, or result ingestion.
+5. There is no result model, technical validation, pathologist validation, report release, or result PDF.
+6. BIO0231 now has an Androstenedione parameter (`ANDRO`, unit `ng/mL`); reference limits remain pending clinical approval.
+7. Most imported tests still need specimen/container and price review.
+8. Analyzer overlay allowlisting is configured via `ANALYZER_OVERLAY_TARGETS`.
+9. Production still uses development authentication headers and requires a production identity provider/security hardening before real patient use.
 
 ## Next implementation milestone
 
 Build the analytical workflow in this order:
 
-1. Add analyzer mapping delete/deactivate support.
-2. Add test parameter editing, units, reference ranges, and critical thresholds.
-3. Create an analyzer worklist for accepted specimens whose requested tests have active mappings.
-4. Add an analyzer order state machine: `queued`, `sending`, `acknowledged`, `failed`, `completed`.
+1. ~~Add analyzer mapping delete/deactivate support.~~
+2. ~~Add test parameter editing, units, reference ranges, and critical thresholds.~~
+3. ~~Create an analyzer worklist for accepted specimens whose requested tests have active mappings.~~
+4. Add an analyzer order state machine / sender: `queued` → `sending` → `acknowledged` / `failed` / `completed`.
 5. Add persistent order attempts, correlation IDs, payload hashes, retry scheduling, and audit events.
 6. Implement a real UAT protocol. Prefer HL7 v2.5.1/IHE LAW for the simulator unless a target analyzer manual requires ASTM.
 7. Upgrade the Mac simulator to receive an order, validate barcode/test code, send ACK, and return a test result.

@@ -15,11 +15,13 @@ class Settings(BaseSettings):
     dev_auth_organization_code: str = "DEVLAB"
     session_ttl_minutes: int = Field(default=60, ge=5, le=1440)
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+    # Comma-separated overlay IPs (e.g. Tailscale) allowed for analyzer TCP probes.
+    analyzer_overlay_targets: Annotated[list[str], NoDecode] = ["100.122.201.68"]
     log_level: str = "INFO"
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "analyzer_overlay_targets", mode="before")
     @classmethod
-    def parse_origins(cls, value: object) -> object:
+    def parse_csv_list(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
