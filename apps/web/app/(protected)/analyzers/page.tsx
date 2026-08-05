@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { Activity, AlertCircle, Cable, Cpu, Network, Plus, Search, Trash2, X } from "lucide-react";
+import { Activity, AlertCircle, Cable, Cpu, Network, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { api, Page } from "@/lib/api";
 import { can } from "@/lib/auth";
 
@@ -25,6 +25,7 @@ export default function AnalyzersPage() {
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
   const [open,setOpen]=useState(false);
+  const [editing,setEditing]=useState<Analyzer|null>(null);
   const [saving,setSaving]=useState(false);
   const [mappingAnalyzer,setMappingAnalyzer]=useState<Analyzer|null>(null);
   const [mappings,setMappings]=useState<TestMapping[]>([]);
@@ -64,12 +65,31 @@ export default function AnalyzersPage() {
     return()=>{active=false;window.clearTimeout(timer)};
   },[mappingAnalyzer,testSearch]);
 
+  function openCreate(){setEditing(null);setOpen(true);}
+  function openEdit(analyzer:Analyzer){setEditing(analyzer);setOpen(true);}
+  function closeForm(){setOpen(false);setEditing(null);}
+
   async function submitAnalyzer(event:FormEvent<HTMLFormElement>){
     event.preventDefault(); const data=new FormData(event.currentTarget);
     try {
       setSaving(true); setError("");
-      await api("/analyzers",{method:"POST",body:JSON.stringify({branch_id:data.get("branch_id"),code:String(data.get("code")).trim().toUpperCase(),vendor:data.get("vendor"),model:data.get("model"),protocol:data.get("protocol"),host:String(data.get("host")).trim(),port:Number(data.get("port")),connection_mode:data.get("connection_mode"),connection_timeout_seconds:Number(data.get("connection_timeout_seconds")),retry_limit:Number(data.get("retry_limit")),heartbeat_interval_seconds:Number(data.get("heartbeat_interval_seconds"))})});
-      setOpen(false); await load();
+      if(editing){
+        await api(`/analyzers/${editing.id}`,{method:"PATCH",body:JSON.stringify({
+          vendor:data.get("vendor"),
+          model:data.get("model"),
+          protocol:data.get("protocol"),
+          host:String(data.get("host")).trim(),
+          port:Number(data.get("port")),
+          connection_mode:data.get("connection_mode"),
+          connection_timeout_seconds:Number(data.get("connection_timeout_seconds")),
+          retry_limit:Number(data.get("retry_limit")),
+          heartbeat_interval_seconds:Number(data.get("heartbeat_interval_seconds")),
+          status:data.get("status"),
+        })});
+      } else {
+        await api("/analyzers",{method:"POST",body:JSON.stringify({branch_id:data.get("branch_id"),code:String(data.get("code")).trim().toUpperCase(),vendor:data.get("vendor"),model:data.get("model"),protocol:data.get("protocol"),host:String(data.get("host")).trim(),port:Number(data.get("port")),connection_mode:data.get("connection_mode"),connection_timeout_seconds:Number(data.get("connection_timeout_seconds")),retry_limit:Number(data.get("retry_limit")),heartbeat_interval_seconds:Number(data.get("heartbeat_interval_seconds"))})});
+      }
+      closeForm(); await load();
     } catch(reason){setError(reason instanceof Error?reason.message:"Unable to save analyzer");}
     finally{setSaving(false);}
   }
@@ -149,17 +169,17 @@ export default function AnalyzersPage() {
   const parameterDefault=(parameterId:string,key:"machine_parameter_code"|"unit")=>existingMapping?.parameters.find(item=>item.parameter_id===parameterId)?.[key]??"";
 
   return <section>
-    <div className="page-heading"><div><p className="eyebrow">INSTRUMENT INTERFACE</p><h1>Analyzers</h1><p>Configure laboratory machines and map LIS tests to machine identifiers.</p></div>{can("analyzer.manage")&&<button className="primary" onClick={()=>setOpen(true)}><Plus size={17}/> Add analyzer</button>}</div>
+    <div className="page-heading"><div><p className="eyebrow">INSTRUMENT INTERFACE</p><h1>Analyzers</h1><p>Configure laboratory machines and map LIS tests to machine identifiers.</p></div>{can("analyzer.manage")&&<button className="primary" onClick={openCreate}><Plus size={17}/> Add analyzer</button>}</div>
     <div className="analyzer-metrics"><article><Cpu/><span><strong>{total}</strong><small>configured analyzers</small></span></article><article><Network/><span><strong>{records.filter(item=>item.connection_status==="connected").length}</strong><small>connected analyzers</small></span></article></div>
     {error&&<div className="error-state"><AlertCircle size={18}/>{error}<button onClick={()=>void load()}>Retry</button></div>}
     <div className="panel"><div className="toolbar"><label className="search"><Search size={17}/><input aria-label="Filter analyzers" placeholder="Filter by code, vendor, model, or IP…" value={filter} onChange={event=>setFilter(event.target.value)}/></label><span>{total} records</span></div>
-      {loading?<div className="loading"><i/><i/><i/></div>:shown.length===0?<div className="empty-state"><Cpu/><h3>No analyzers configured</h3><p>Add the first analyzer using its manufacturer interface manual.</p></div>:<div className="table-wrap"><table className="analyzer-table"><thead><tr><th>Analyzer</th><th>Branch</th><th>Protocol</th><th>Network endpoint</th><th>Connection</th><th>Configuration</th><th>Actions</th></tr></thead><tbody>{shown.map(item=><tr key={item.id}><td><strong>{item.vendor} {item.model}</strong><span>{item.code}</span></td><td>{branchName(item.branch_id)}</td><td>{protocolLabels[item.protocol]??item.protocol}</td><td><code>{item.host}:{item.port}</code><span>{item.connection_mode}</span></td><td><span className={`connection-status ${item.connection_status}`}>{item.connection_status.replaceAll("_"," ")}</span>{item.last_connection_test_at&&<span>{new Date(item.last_connection_test_at).toLocaleString()}</span>}</td><td><span className={`status ${item.status}`}>{item.status}</span></td><td><div className="analyzer-actions"><button className="mapping-button" onClick={()=>void openConnection(item)}><Activity size={14}/> Connection</button><button className="mapping-button" onClick={()=>void openMappings(item)}><Cable size={14}/> Map tests</button></div></td></tr>)}</tbody></table></div>}
+      {loading?<div className="loading"><i/><i/><i/></div>:shown.length===0?<div className="empty-state"><Cpu/><h3>No analyzers configured</h3><p>Add the first analyzer using its manufacturer interface manual.</p></div>:<div className="table-wrap"><table className="analyzer-table"><thead><tr><th>Analyzer</th><th>Branch</th><th>Protocol</th><th>Network endpoint</th><th>Connection</th><th>Configuration</th><th>Actions</th></tr></thead><tbody>{shown.map(item=><tr key={item.id}><td><strong>{item.vendor} {item.model}</strong><span>{item.code}</span></td><td>{branchName(item.branch_id)}</td><td>{protocolLabels[item.protocol]??item.protocol}</td><td><code>{item.host}:{item.port}</code><span>{item.connection_mode}</span></td><td><span className={`connection-status ${item.connection_status}`}>{item.connection_status.replaceAll("_"," ")}</span>{item.last_connection_test_at&&<span>{new Date(item.last_connection_test_at).toLocaleString()}</span>}</td><td><span className={`status ${item.status}`}>{item.status}</span></td><td><div className="analyzer-actions">{can("analyzer.manage")&&<button className="mapping-button" onClick={()=>openEdit(item)}><Pencil size={14}/> Edit</button>}<button className="mapping-button" onClick={()=>void openConnection(item)}><Activity size={14}/> Connection</button><button className="mapping-button" onClick={()=>void openMappings(item)}><Cable size={14}/> Map tests</button></div></td></tr>)}</tbody></table></div>}
       <div className="pagination"><span>Showing {shown.length} of {total}</span></div>
     </div>
-    {open&&<div className="modal-backdrop"><section className="modal analyzer-modal"><div className="modal-head"><div><p className="eyebrow">NEW CONNECTION</p><h2>Configure analyzer</h2></div><button aria-label="Close" onClick={()=>setOpen(false)}><X/></button></div><form onSubmit={submitAnalyzer}>
-      <label>Branch *<select name="branch_id" required defaultValue=""><option value="" disabled>Select branch</option>{branches.map(branch=><option key={branch.id} value={branch.id}>{branch.name} · {branch.code}</option>)}</select></label>
-      <div className="analyzer-form-grid"><label>Machine code *<input name="code" required minLength={2} maxLength={40} placeholder="HEM-01" pattern="[A-Za-z0-9_-]+"/></label><label>Vendor *<input name="vendor" required placeholder="e.g. Sysmex"/></label><label>Model *<input name="model" required placeholder="e.g. XN-1000"/></label><label>Protocol *<select name="protocol" required defaultValue=""><option value="" disabled>Select from interface manual</option>{Object.entries(protocolLabels).map(([value,label])=><option value={value} key={value}>{label}</option>)}</select></label><label>Private IP address *<input name="host" required inputMode="decimal" placeholder="192.168.1.50"/></label><label>Port *<input name="port" required type="number" min="1" max="65535" placeholder="5000"/></label><label>Communication *<select name="connection_mode" defaultValue="bidirectional"><option value="bidirectional">Bidirectional (orders + results)</option><option value="unidirectional">Unidirectional (results only)</option></select></label><label>Timeout (seconds) *<input name="connection_timeout_seconds" required type="number" min="1" max="15" defaultValue="3"/></label><label>Retry limit *<input name="retry_limit" required type="number" min="0" max="5" defaultValue="2"/></label><label>Heartbeat interval (seconds) *<input name="heartbeat_interval_seconds" required type="number" min="15" max="3600" defaultValue="60"/></label></div>
-      <p className="configuration-note">Use the static IP, port, and protocol from the analyzer interface manual.</p><div className="form-actions"><button type="button" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving}>{saving?"Saving…":"Save analyzer"}</button></div>
+    {open&&<div className="modal-backdrop"><section className="modal analyzer-modal"><div className="modal-head"><div><p className="eyebrow">{editing?"EDIT CONNECTION":"NEW CONNECTION"}</p><h2>{editing?"Edit analyzer":"Configure analyzer"}</h2>{editing&&<small>{editing.code}</small>}</div><button aria-label="Close" onClick={closeForm}><X/></button></div><form key={editing?.id??"new"} onSubmit={submitAnalyzer}>
+      {!editing&&<label>Branch *<select name="branch_id" required defaultValue=""><option value="" disabled>Select branch</option>{branches.map(branch=><option key={branch.id} value={branch.id}>{branch.name} · {branch.code}</option>)}</select></label>}
+      <div className="analyzer-form-grid">{!editing&&<label>Machine code *<input name="code" required minLength={2} maxLength={40} placeholder="HEM-01" pattern="[A-Za-z0-9_-]+"/></label>}<label>Vendor *<input name="vendor" required defaultValue={editing?.vendor??""} placeholder="e.g. Sysmex"/></label><label>Model *<input name="model" required defaultValue={editing?.model??""} placeholder="e.g. XN-1000"/></label><label>Protocol *<select name="protocol" required defaultValue={editing?.protocol??""}><option value="" disabled>Select from interface manual</option>{Object.entries(protocolLabels).map(([value,label])=><option value={value} key={value}>{label}</option>)}</select></label><label>Private IP address *<input name="host" required inputMode="decimal" defaultValue={editing?.host??""} placeholder="192.168.1.50"/></label><label>Port *<input name="port" required type="number" min="1" max="65535" defaultValue={editing?.port??""} placeholder="5000"/></label><label>Communication *<select name="connection_mode" defaultValue={editing?.connection_mode??"bidirectional"}><option value="bidirectional">Bidirectional (orders + results)</option><option value="unidirectional">Unidirectional (results only)</option></select></label><label>Timeout (seconds) *<input name="connection_timeout_seconds" required type="number" min="1" max="15" defaultValue={editing?.connection_timeout_seconds??3}/></label><label>Retry limit *<input name="retry_limit" required type="number" min="0" max="5" defaultValue={editing?.retry_limit??2}/></label><label>Heartbeat interval (seconds) *<input name="heartbeat_interval_seconds" required type="number" min="15" max="3600" defaultValue={editing?.heartbeat_interval_seconds??60}/></label>{editing&&<label>Status *<select name="status" required defaultValue={editing.status}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>}</div>
+      <p className="configuration-note">Use the static IP, port, and protocol from the analyzer interface manual.</p><div className="form-actions"><button type="button" onClick={closeForm}>Cancel</button><button className="primary" disabled={saving}>{saving?"Saving…":editing?"Save changes":"Save analyzer"}</button></div>
     </form></section></div>}
     {mappingAnalyzer&&<div className="modal-backdrop"><section className="modal mapping-modal"><div className="modal-head"><div><p className="eyebrow">TEST-CODE MAPPING</p><h2>{mappingAnalyzer.vendor} {mappingAnalyzer.model}</h2><small>{mappingAnalyzer.code} · {mappings.length} mapped test(s)</small></div><button aria-label="Close mappings" onClick={()=>setMappingAnalyzer(null)}><X/></button></div>
       <div className="mapping-layout"><aside><h3>Mapped tests</h3>{mappings.length===0?<p>No tests mapped yet.</p>:mappings.map(mapping=><div key={mapping.id} className="mapping-chip-row"><button className={selectedTestId===mapping.test_id?"active":""} onClick={()=>setSelectedTestId(mapping.test_id)}><strong>{mapping.lis_test_code} → {mapping.machine_test_code}</strong><span>{mapping.test_name} · {mapping.parameters.length} parameters · {mapping.status}</span></button>{can("analyzer.manage")&&<div className="mapping-chip-actions"><button type="button" onClick={()=>void deactivateMapping(mapping)} disabled={saving}>{mapping.status==="active"?"Deactivate":"Activate"}</button><button type="button" aria-label={`Delete ${mapping.lis_test_code}`} onClick={()=>void removeMapping(mapping)} disabled={saving}><Trash2 size={14}/></button></div>}</div>)}</aside>
