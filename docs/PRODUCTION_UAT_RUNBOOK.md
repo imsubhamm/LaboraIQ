@@ -14,19 +14,36 @@ Credentials are intentionally excluded. Use the approved local SSH configuration
 
 ## Production deployment
 
-Deploy reviewed source files to the equivalent paths under `/opt/laboraiq`, then run:
+Production deploys from GitHub `main` the same way as Dascon: push (or manual workflow dispatch) runs `.github/workflows/deploy-ec2.yml`, which SSHs to EC2, `git reset --hard origin/main`, reinstalls API deps, rebuilds the web app, and restarts `laboraiq-api` / `laboraiq-web`.
+
+Required GitHub Actions secrets:
+
+- `EC2_HOST` — `16.16.97.239`
+- `EC2_USER` — `ubuntu`
+- `EC2_SSH_KEY` — private key that can SSH to the instance
+
+One-time EC2 bootstrap (preserves `.env`, backups, and local venvs):
 
 ```bash
-sudo systemctl restart laboraiq-api
-sudo systemctl stop laboraiq-web
-cd /opt/laboraiq/apps/web
-npm ci
-npm run build
-sudo systemctl start laboraiq-web
-sudo systemctl is-active laboraiq-api laboraiq-web
+ssh -i <key.pem> ubuntu@16.16.97.239
+cd /opt/laboraiq
+bash scripts/bootstrap-ec2-git.sh
 ```
 
-When API models change, ensure the Alembic migration is deployed before restarting. The API service runs `alembic upgrade head` as `ExecStartPre`.
+Manual deploy on the box (same steps as CI):
+
+```bash
+cd /opt/laboraiq
+bash scripts/deploy-ec2.sh
+```
+
+Or trigger from GitHub:
+
+```bash
+gh workflow run deploy-ec2.yml --repo imsubhamm/LaboraIQ
+```
+
+When API models change, ensure the Alembic migration is on `main` before deploy. The API service runs `alembic upgrade head` as `ExecStartPre`.
 
 Review logs with:
 

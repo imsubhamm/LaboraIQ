@@ -24,7 +24,8 @@ LaboraIQ is a multi-tenant laboratory information system covering patient intake
 - API binds to `127.0.0.1:8000`.
 - Web binds to `127.0.0.1:3100`.
 - Tailscale connects EC2 to the Mac analyzer simulator.
-- Production deployment is currently manual; see `docs/PRODUCTION_UAT_RUNBOOK.md`.
+- Production deploys from GitHub `main` via `.github/workflows/deploy-ec2.yml` (Dascon-style SSH + git pull). See `docs/PRODUCTION_UAT_RUNBOOK.md`.
+
 
 Do not commit SSH keys, Tailscale auth keys, passwords, cookies, tokens, or `.env` files.
 
@@ -33,7 +34,7 @@ Do not commit SSH keys, Tailscale auth keys, passwords, cookies, tokens, or `.en
 ### Patient intake
 
 - Mandatory patient and visit information appears first.
-- Returning-patient lookup supports UUID, patient number, phone, email, and exact case-insensitive patient name.
+- Returning-patient lookup supports UUID, patient number, phone, email, exact name, and unique partial name match.
 - Duplicate patient names fail safely and request a stronger identifier.
 - Test selection is searchable and uses real checkbox controls.
 - Patient registration creates the order, invoice, and specimen records.

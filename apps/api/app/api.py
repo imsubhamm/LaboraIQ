@@ -1246,7 +1246,7 @@ def lookup_patient(
     context: Annotated[AuthContext, Depends(require_permission("branch.read"))],
     query: Annotated[str, Query(min_length=3, max_length=320)],
 ) -> PatientLookupRead | None:
-    """Find a returning patient by UUID, patient number, phone, email, or exact name."""
+    """Find a returning patient by UUID, patient number, phone, email, or name."""
     value = query.strip()
     conditions = [
         Patient.patient_number == value,
@@ -1264,23 +1264,38 @@ def lookup_patient(
         )
     )
     if patient is None:
+        # Prefer an exact name match; otherwise allow a unique partial name match.
+        name_filter = func.lower(Patient.full_name) == value.lower()
         name_matches = list(
             db.scalars(
                 select(Patient)
                 .where(
                     Patient.organization_id == context.organization_id,
-                    func.lower(Patient.full_name) == value.lower(),
+                    name_filter,
                 )
                 .order_by(Patient.updated_at.desc(), Patient.id.desc())
                 .limit(2)
             ).all()
         )
+        if not name_matches:
+            name_filter = func.lower(Patient.full_name).like(f"%{value.lower()}%")
+            name_matches = list(
+                db.scalars(
+                    select(Patient)
+                    .where(
+                        Patient.organization_id == context.organization_id,
+                        name_filter,
+                    )
+                    .order_by(Patient.updated_at.desc(), Patient.id.desc())
+                    .limit(2)
+                ).all()
+            )
         if len(name_matches) > 1:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Multiple patients have this name. Search using patient number, "
-                    "phone, email, or UUID."
+                    "Multiple patients match this name. Search using the full name, "
+                    "patient number, phone, email, or UUID."
                 ),
             )
         patient = name_matches[0] if name_matches else None
@@ -1325,10 +1340,20 @@ def list_patients(
     offset: Annotated[int, Query(ge=0)] = 0,
     search: Annotated[str | None, Query(max_length=200)] = None,
 ) -> Page[PatientLookupRead]:
-    statement = select(Patient).where(Patient.organization_id == context.organization_id)
+    visit_summary = (
+        select(
+            LabOrder.patient_id.label("patient_id"),
+            func.count(LabOrder.id).label("visit_count"),
+            func.max(LabOrder.created_at).label("last_visit_at"),
+        )
+        .where(LabOrder.organization_id == context.organization_id)
+        .group_by(LabOrder.patient_id)
+        .subquery()
+    )
+    filters = [Patient.organization_id == context.organization_id]
     if search:
         term = f"%{search.strip().lower()}%"
-        statement = statement.where(
+        filters.append(
             or_(
                 func.lower(Patient.patient_number).like(term),
                 func.lower(Patient.full_name).like(term),
@@ -1336,22 +1361,24 @@ def list_patients(
                 func.lower(Patient.email).like(term),
             )
         )
-    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
-    patients = list(
-        db.scalars(
-            statement.order_by(Patient.updated_at.desc(), Patient.id.desc())
-            .limit(limit)
-            .offset(offset)
-        ).all()
-    )
+    rows = db.execute(
+        select(
+            Patient,
+            func.coalesce(visit_summary.c.visit_count, 0),
+            visit_summary.c.last_visit_at,
+            func.count(Patient.id).over().label("total_count"),
+        )
+        .outerjoin(visit_summary, visit_summary.c.patient_id == Patient.id)
+        .where(*filters)
+        .order_by(Patient.updated_at.desc(), Patient.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    total = rows[0].total_count if rows else 0
+    if not rows and offset:
+        total = db.scalar(select(func.count(Patient.id)).where(*filters)) or 0
     items: list[PatientLookupRead] = []
-    for patient in patients:
-        visit_count, last_visit_at = db.execute(
-            select(func.count(LabOrder.id), func.max(LabOrder.created_at)).where(
-                LabOrder.organization_id == context.organization_id,
-                LabOrder.patient_id == patient.id,
-            )
-        ).one()
+    for patient, visit_count, last_visit_at, _ in rows:
         items.append(
             PatientLookupRead.model_validate(
                 {

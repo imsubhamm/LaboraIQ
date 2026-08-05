@@ -5,12 +5,12 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import User, UserRoleAssignment
+from app.models import Permission, RolePermission, User, UserRoleAssignment
 
 
 @dataclass(frozen=True)
@@ -43,36 +43,44 @@ def get_auth_context(
         raise HTTPException(status_code=401, detail="OIDC provider is not configured")
 
     email = x_dev_user_email or settings.dev_auth_user_email
-    user = db.scalar(select(User).where(User.email == email, User.status == "active"))
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authenticated identity is not provisioned")
-
     current = datetime.now(UTC)
-    assignments = db.scalars(
-        select(UserRoleAssignment).where(
-            UserRoleAssignment.user_id == user.id,
-            UserRoleAssignment.organization_id == user.organization_id,
-            UserRoleAssignment.active.is_(True),
-            UserRoleAssignment.effective_at <= current,
-            or_(
-                UserRoleAssignment.expires_at.is_(None),
-                UserRoleAssignment.expires_at > current,
+    rows = db.execute(
+        select(User, UserRoleAssignment.id, UserRoleAssignment.branch_id, Permission.code)
+        .outerjoin(
+            UserRoleAssignment,
+            and_(
+                UserRoleAssignment.user_id == User.id,
+                UserRoleAssignment.organization_id == User.organization_id,
+                UserRoleAssignment.active.is_(True),
+                UserRoleAssignment.effective_at <= current,
+                or_(
+                    UserRoleAssignment.expires_at.is_(None),
+                    UserRoleAssignment.expires_at > current,
+                ),
             ),
         )
+        .outerjoin(RolePermission, RolePermission.role_id == UserRoleAssignment.role_id)
+        .outerjoin(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            User.email == email,
+            User.status == "active",
+        )
     ).all()
-    permissions = {
-        permission.code for assignment in assignments for permission in assignment.role.permissions
-    }
+    if not rows:
+        raise HTTPException(status_code=401, detail="Authenticated identity is not provisioned")
+    user = rows[0][0]
+    permissions = {permission_code for _, _, _, permission_code in rows if permission_code}
     request.state.auth = user
     return AuthContext(
         user_id=user.id,
         organization_id=user.organization_id,
         email=user.email,
-        branch_ids=frozenset(
-            assignment.branch_id for assignment in assignments if assignment.branch_id
-        ),
+        branch_ids=frozenset(branch_id for _, _, branch_id, _ in rows if branch_id),
         permissions=frozenset(permissions),
-        is_organization_scoped=any(assignment.branch_id is None for assignment in assignments),
+        is_organization_scoped=any(
+            assignment_id is not None and branch_id is None
+            for _, assignment_id, branch_id, _ in rows
+        ),
     )
 
 

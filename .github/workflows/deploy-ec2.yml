@@ -1,0 +1,61 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-laboraiq-ec2
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          command_timeout: 35m
+          script: |
+            set -e
+            cd /opt/laboraiq
+            if [ ! -d .git ]; then
+              echo "EC2 app root is not a git checkout yet. Run scripts/bootstrap-ec2-git.sh once."
+              exit 1
+            fi
+            git remote set-url origin https://github.com/imsubhamm/LaboraIQ.git
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+            git clean -fd --exclude=.env --exclude=backups --exclude=apps/api/.venv --exclude=apps/web/node_modules --exclude=apps/web/.next
+
+            cd /opt/laboraiq/apps/api
+            if [ ! -x .venv/bin/pip ]; then
+              python3 -m venv .venv
+            fi
+            .venv/bin/pip install -e . -q
+            sudo systemctl restart laboraiq-api
+
+            cd /opt/laboraiq/apps/web
+            npm ci
+            npm run build
+            sudo systemctl restart laboraiq-web
+
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/api/v1/health || true)
+              if [ "$code" = "200" ]; then
+                sudo systemctl is-active laboraiq-api laboraiq-web
+                echo "Deploy OK"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "API did not become healthy in time"
+            sudo journalctl -u laboraiq-api -n 80 --no-pager
+            exit 1

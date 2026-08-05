@@ -318,6 +318,10 @@ def test_returning_patient_is_updated_and_history_is_appended(
     assert name_lookup.status_code == 200
     assert name_lookup.json()["id"] == patient_id
 
+    partial_lookup = client.get("/api/v1/patients/lookup", params={"query": "returning"})
+    assert partial_lookup.status_code == 200
+    assert partial_lookup.json()["id"] == patient_id
+
     payload.update(
         {
             "patient_id": patient_id,
