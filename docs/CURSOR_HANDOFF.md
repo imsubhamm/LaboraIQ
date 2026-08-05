@@ -127,7 +127,16 @@ There is also an incorrect UAT mapping of `BIO0231 -> A4` on the Sysmex XN-1000 
 5. BIO0231 Androstenedione parameter (`ANDRO`, unit `ng/mL`); reference limits remain pending clinical approval.
 6. Most imported tests still need specimen/container and price review.
 7. Analyzer overlay allowlisting is configured via `ANALYZER_OVERLAY_TARGETS`.
-8. Production still uses development authentication headers and requires a production identity provider/security hardening before real patient use.
+8. Production must set `ENVIRONMENT=production`, `DEV_AUTH_ENABLED=false`, a strong `SESSION_SECRET`, and OIDC (`OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_CLIENT_ID`). Admin password login still needs API `DEV_AUTH_ENABLED` to mint a session and is for local/UAT only.
+
+## Auth (Phase 5)
+
+- API accepts `Authorization: Bearer` LaboraIQ session JWTs (HS256) or verified OIDC ID tokens.
+- `POST /auth/session` mints a session JWT for an already-authenticated caller (Bearer or `X-Dev-User-Email` when `DEV_AUTH_ENABLED=true`).
+- `POST /auth/oidc/session` exchanges a verified OIDC `id_token` for a LaboraIQ session JWT and binds `User.auth_provider_id` on first login.
+- `GET /auth/me` and `GET /auth/oidc/metadata` support the web login UI.
+- Web stores the session JWT in `labora_session` (httpOnly) + `labora_token` (readable) and sends `Authorization: Bearer` from the browser.
+- OIDC Authorization Code + PKCE: `/auth/oidc/start` → IdP → `/auth/oidc/callback`.
 
 ## Next implementation milestone
 
@@ -143,8 +152,9 @@ Build the analytical workflow in this order:
 8. ~~Store raw inbound/outbound HL7 messages.~~
 9. ~~Add result normalization by analyzer mapping, including units and flags.~~
 10. ~~Add technical review, pathologist validation, report release, and PDF output.~~
+11. ~~Production OIDC / signed session auth (Phase 5).~~
 
-Remaining: production OIDC/auth hardening, clinical reference range approval, and broader instrument adapters.
+Remaining: configure a real IdP for production, clinical reference range approval, and broader instrument adapters.
 
 ## Recommended message flow for the next UAT
 

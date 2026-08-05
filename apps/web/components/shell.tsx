@@ -33,6 +33,8 @@ export function visibleNavigation() {
 export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   async function logout() {
+    const { clearBrowserAccessToken } = await import("@/lib/session");
+    clearBrowserAccessToken();
     await fetch("/auth/logout", { method: "POST" });
     window.location.assign("/login");
   }

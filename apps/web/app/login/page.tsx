@@ -1,16 +1,40 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import {
   Activity, ArrowRight, CheckCircle2, FlaskConical, LockKeyhole,
   Mail, ShieldCheck, Sparkles
 } from "lucide-react";
+import { storeBrowserAccessToken } from "@/lib/session";
+
+type OidcMetadata = {
+  enabled: boolean;
+  authorization_endpoint?: string | null;
+};
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+  const [reason, setReason] = useState("");
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const nextReason = params.get("reason");
+    if (nextReason === "expired") setReason("Your session expired. Please sign in again.");
+    else if (nextReason?.startsWith("oidc_")) setReason("Single sign-on failed. Try again or use administrator credentials.");
+
+    const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
+    fetch(`${apiBase}/auth/oidc/metadata`)
+      .then(async (response) => {
+        if (!response.ok) return;
+        const body = (await response.json()) as OidcMetadata;
+        setOidcEnabled(Boolean(body.enabled && body.authorization_endpoint));
+      })
+      .catch(() => undefined);
+  }, []);
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -24,6 +48,9 @@ export default function LoginPage() {
       });
       const body = await response.json().catch(() => ({ detail: "Unable to sign in" }));
       if (!response.ok) throw new Error(body.detail ?? "Unable to sign in");
+      if (typeof body.access_token === "string") {
+        storeBrowserAccessToken(body.access_token);
+      }
       const returnTo = new URLSearchParams(window.location.search).get("returnTo");
       window.location.assign(returnTo?.startsWith("/") ? returnTo : "/dashboard");
     } catch (loginError) {
@@ -31,6 +58,13 @@ export default function LoginPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function startOidc() {
+    const returnTo = new URLSearchParams(window.location.search).get("returnTo");
+    const start = new URL("/auth/oidc/start", window.location.origin);
+    if (returnTo?.startsWith("/")) start.searchParams.set("returnTo", returnTo);
+    window.location.assign(start.toString());
   }
 
   return (
@@ -66,7 +100,16 @@ export default function LoginPage() {
             <div className="login-card-icon"><LockKeyhole size={21}/></div>
             <p className="eyebrow">SECURE WORKSPACE</p>
             <h2>Welcome back</h2>
-            <p>Enter your administrator credentials to continue.</p>
+            <p>{oidcEnabled ? "Sign in with your organization identity provider, or use administrator credentials when enabled." : "Enter your administrator credentials to continue."}</p>
+            {reason && <div className="error-state" role="status">{reason}</div>}
+            {oidcEnabled && (
+              <>
+                <button type="button" className="login-sso" onClick={startOidc}>
+                  Continue with single sign-on<ArrowRight size={17}/>
+                </button>
+                <div className="login-or" role="separator">or</div>
+              </>
+            )}
             <form className="login-form" onSubmit={login}>
               <label>Email address<div className="input-with-icon"><Mail size={17}/><input required type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} placeholder="name@laboraiq.com"/></div></label>
               <label>Password<div className="input-with-icon"><LockKeyhole size={17}/><input required type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} placeholder="Enter your password"/></div></label>

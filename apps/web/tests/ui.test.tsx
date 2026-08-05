@@ -12,10 +12,10 @@ vi.mock("@/lib/api", async () => {
 });
 
 describe("platform administration UI", () => {
-  it("rejects missing and expired sessions", () => {
-    expect(isSessionValid(undefined, 100)).toBe(false);
-    expect(isSessionValid("99", 100)).toBe(false);
-    expect(isSessionValid("101", 100)).toBe(true);
+  it("rejects missing and expired sessions", async () => {
+    expect(await isSessionValid(undefined, 100)).toBe(false);
+    expect(await isSessionValid("99", 100)).toBe(false);
+    expect(await isSessionValid("101", 100)).toBe(true);
   });
 
   it("uses permission-aware actions", () => {

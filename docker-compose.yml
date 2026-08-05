@@ -22,7 +22,10 @@ services:
     build: ./apps/web
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_DEV_AUTH_HEADER: "true"
+      NEXT_PUBLIC_DEV_AUTH_EMAIL: admin@dev.labora.local
       DEV_AUTH_BYPASS: "true"
+      SESSION_SECRET: dev-insecure-session-secret-change-me
     ports: ["3000:3000"]
     depends_on: [api]
 volumes:

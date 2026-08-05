@@ -1,3 +1,9 @@
+import {
+  clearBrowserAccessToken,
+  readBrowserAccessToken,
+  storeBrowserAccessToken
+} from "@/lib/session";
+
 export type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 export type RecordValue = string | number | boolean | null | undefined;
 export type ApiRecord = Record<string, RecordValue>;
@@ -27,18 +33,34 @@ function errorMessage(detail: unknown): string {
   return "Request failed";
 }
 
+function authHeaders(): HeadersInit {
+  const headers: Record<string, string> = {};
+  const token = readBrowserAccessToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+    return headers;
+  }
+  // Local/dev fallback only when the browser has no session JWT yet.
+  if (process.env.NEXT_PUBLIC_DEV_AUTH_HEADER === "true") {
+    headers["X-Dev-User-Email"] =
+      process.env.NEXT_PUBLIC_DEV_AUTH_EMAIL?.trim() || "admin@dev.labora.local";
+  }
+  return headers;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
       ...(!isFormData ? { "Content-Type": "application/json" } : {}),
-      "X-Dev-User-Email": "admin@dev.labora.local",
+      ...authHeaders(),
       ...init?.headers
     },
     cache: "no-store"
   });
   if (response.status === 401 && typeof window !== "undefined") {
+    clearBrowserAccessToken();
     window.location.assign("/login?reason=expired");
   }
   if (!response.ok) {
@@ -48,3 +70,5 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+
+export { storeBrowserAccessToken };
