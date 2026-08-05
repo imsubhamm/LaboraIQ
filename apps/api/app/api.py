@@ -256,9 +256,7 @@ def create_auth_session(db: Db, context: Auth) -> SessionTokenRead:
 
 
 @router.post("/auth/oidc/session", response_model=SessionTokenRead)
-def create_oidc_session(
-    payload: OidcSessionCreate, db: Db, request: Request
-) -> SessionTokenRead:
+def create_oidc_session(payload: OidcSessionCreate, db: Db, request: Request) -> SessionTokenRead:
     try:
         claims = verify_oidc_id_token(payload.id_token)
     except OidcNotConfiguredError as error:
