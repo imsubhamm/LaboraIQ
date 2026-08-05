@@ -14,7 +14,13 @@ Credentials are intentionally excluded. Use the approved local SSH configuration
 
 ## Production deployment
 
-Production deploys from GitHub `main` the same way as Dascon: push (or manual workflow dispatch) runs `.github/workflows/deploy-ec2.yml`, which SSHs to EC2, `git reset --hard origin/main`, reinstalls API deps, rebuilds the web app, and restarts `laboraiq-api` / `laboraiq-web`.
+Production pipeline on `main`:
+
+1. Merge a PR → **Core platform CI** runs once.
+2. If CI succeeds → **Deploy to EC2** starts (no parallel push trigger).
+3. Manual deploy remains available via `workflow_dispatch` / `gh workflow run`.
+
+Deploy SSHs to EC2, `git reset --hard origin/main`, reinstalls API deps, rebuilds the web app, and restarts `laboraiq-api` / `laboraiq-web`.
 
 Required GitHub Actions secrets:
 

@@ -1,7 +1,11 @@
 name: Deploy to EC2
 
+# Runs only after Core platform CI succeeds on main (or manual dispatch).
+# This avoids a parallel "duplicate" push trigger alongside CI.
 on:
-  push:
+  workflow_run:
+    workflows: ["Core platform CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -11,6 +15,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
