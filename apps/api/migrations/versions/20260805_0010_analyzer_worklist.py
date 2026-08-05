@@ -4,9 +4,10 @@ Revision ID: 20260805_0010
 Revises: 20260805_0009
 """
 
+import uuid
+
 import sqlalchemy as sa
 from alembic import op
-import uuid
 
 revision = "20260805_0010"
 down_revision = "20260805_0009"
@@ -133,7 +134,8 @@ def upgrade() -> None:
     for (test_id,) in tests:
         exists = bind.execute(
             sa.text(
-                "SELECT 1 FROM test_catalog_parameters WHERE test_id = :test_id AND external_code = 'ANDRO'"
+                "SELECT 1 FROM test_catalog_parameters "
+                "WHERE test_id = :test_id AND external_code = 'ANDRO'"
             ),
             {"test_id": test_id},
         ).fetchone()
