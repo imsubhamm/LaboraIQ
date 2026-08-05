@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     dev_auth_organization_code: str = "DEVLAB"
     session_ttl_minutes: int = Field(default=60, ge=5, le=1440)
     session_secret: str = "dev-insecure-session-secret-change-me"
+    db_pool_size: int = Field(default=10, ge=1, le=50)
+    db_max_overflow: int = Field(default=20, ge=0, le=50)
+    db_pool_timeout: int = Field(default=30, ge=1, le=120)
+    db_pool_recycle: int = Field(default=300, ge=30, le=3600)
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
     oidc_client_id: str | None = None
