@@ -214,6 +214,38 @@ class UserRead(UserCreate):
     updated_at: datetime
 
 
+class OidcMetadataRead(APIModel):
+    enabled: bool
+    issuer: str | None = None
+    client_id: str | None = None
+    authorization_endpoint: str | None = None
+    audience: str | None = None
+
+
+class OidcSessionCreate(APIModel):
+    id_token: str = Field(min_length=20)
+
+
+class SessionTokenRead(APIModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_at: datetime
+    email: str
+    user_id: uuid.UUID
+    organization_id: uuid.UUID
+    permissions: list[str]
+
+
+class AuthMeRead(APIModel):
+    user_id: uuid.UUID
+    organization_id: uuid.UUID
+    email: str
+    display_name: str | None = None
+    permissions: list[str]
+    branch_ids: list[uuid.UUID]
+    is_organization_scoped: bool
+
+
 class PermissionRead(APIModel):
     id: uuid.UUID
     code: str

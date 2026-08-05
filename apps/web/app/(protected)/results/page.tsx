@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, FileText, Search } from "lucide-react";
 import { api, Page } from "@/lib/api";
 import { can } from "@/lib/auth";
+import { readBrowserAccessToken } from "@/lib/session";
 
 type Observation = {
   id: string;
@@ -101,9 +102,19 @@ export default function ResultsPage() {
     if (!selected) return;
     try {
       setBusyId(selected.id);
+      const token = readBrowserAccessToken();
       const response = await fetch(
         `${process.env.NEXT_PUBLIC_API_URL ?? "/api/v1"}/results/${selected.id}/pdf`,
-        { headers: { "X-Dev-User-Email": "admin@dev.labora.local" } }
+        {
+          headers: token
+            ? { Authorization: `Bearer ${token}` }
+            : process.env.NEXT_PUBLIC_DEV_AUTH_HEADER === "true"
+              ? {
+                  "X-Dev-User-Email":
+                    process.env.NEXT_PUBLIC_DEV_AUTH_EMAIL?.trim() || "admin@dev.labora.local"
+                }
+              : {}
+        }
       );
       if (!response.ok) throw new Error("Unable to download PDF");
       const blob = await response.blob();

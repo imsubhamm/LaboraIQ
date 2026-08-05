@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar, cast
 
+import jwt
 from fastapi import (
     APIRouter,
     Depends,
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.analyzer_orders import create_queued_attempt, process_queued_orders
 from app.audit import record_event
-from app.auth import AuthContext, require_permission
+from app.auth import Auth, AuthContext, load_context_for_identity, require_permission
 from app.config import get_settings
 from app.database import get_db
 from app.models import (
@@ -53,6 +54,12 @@ from app.models import (
     User,
     UserRoleAssignment,
 )
+from app.oidc import (
+    OidcNotConfiguredError,
+    fetch_oidc_authorization_endpoint,
+    oidc_enabled,
+    verify_oidc_id_token,
+)
 from app.results import (
     build_result_pdf,
     normalize_worklist_result,
@@ -76,6 +83,7 @@ from app.schemas import (
     AssignmentCreate,
     AssignmentRead,
     AuditEventRead,
+    AuthMeRead,
     BranchCreate,
     BranchRead,
     BranchUpdate,
@@ -87,6 +95,8 @@ from app.schemas import (
     LabResultNotes,
     LabResultObservationRead,
     LabResultRead,
+    OidcMetadataRead,
+    OidcSessionCreate,
     OrganizationCreate,
     OrganizationRead,
     OrganizationUpdate,
@@ -98,6 +108,7 @@ from app.schemas import (
     PermissionRead,
     RoleCreate,
     RoleRead,
+    SessionTokenRead,
     SpecimenCollect,
     SpecimenDecision,
     SpecimenRead,
@@ -113,6 +124,7 @@ from app.schemas import (
     UserRead,
     UserUpdate,
 )
+from app.session_tokens import create_session_token
 
 router = APIRouter()
 Db = Annotated[Session, Depends(get_db)]
@@ -202,6 +214,84 @@ def health() -> dict[str, str]:
 def ready(db: Db) -> dict[str, str]:
     db.execute(select(1))
     return {"status": "ready"}
+
+
+@router.get("/auth/oidc/metadata", response_model=OidcMetadataRead)
+def auth_oidc_metadata() -> OidcMetadataRead:
+    settings = get_settings()
+    return OidcMetadataRead(
+        enabled=oidc_enabled(),
+        issuer=settings.oidc_issuer,
+        client_id=settings.oidc_client_id,
+        authorization_endpoint=fetch_oidc_authorization_endpoint(),
+        audience=settings.oidc_audience,
+    )
+
+
+def _session_response(db: Session, context: AuthContext) -> SessionTokenRead:
+    token, expires_at = create_session_token(
+        email=context.email,
+        subject=str(context.user_id),
+        extra={"org": str(context.organization_id)},
+    )
+    user = db.get(User, context.user_id)
+    if user is not None:
+        user.last_login_at = datetime.now(UTC)
+        commit(db)
+    return SessionTokenRead(
+        access_token=token,
+        token_type="Bearer",
+        expires_at=expires_at,
+        email=context.email,
+        user_id=context.user_id,
+        organization_id=context.organization_id,
+        permissions=sorted(context.permissions),
+    )
+
+
+@router.post("/auth/session", response_model=SessionTokenRead)
+def create_auth_session(db: Db, context: Auth) -> SessionTokenRead:
+    """Mint a LaboraIQ session JWT for an already-authenticated caller (Bearer or dev header)."""
+    return _session_response(db, context)
+
+
+@router.post("/auth/oidc/session", response_model=SessionTokenRead)
+def create_oidc_session(
+    payload: OidcSessionCreate, db: Db, request: Request
+) -> SessionTokenRead:
+    try:
+        claims = verify_oidc_id_token(payload.id_token)
+    except OidcNotConfiguredError as error:
+        raise HTTPException(status_code=503, detail="OIDC is not configured") from error
+    except (jwt.PyJWTError, ValueError) as error:
+        raise HTTPException(status_code=401, detail="Invalid or expired OIDC token") from error
+
+    email = str(claims["email"]).lower().strip()
+    provider_id = str(claims.get("sub") or "")
+    context = load_context_for_identity(
+        db, request, email=email, auth_provider_id=provider_id or None
+    )
+    user = db.get(User, context.user_id)
+    if user is not None and provider_id and user.auth_provider_id != provider_id:
+        # Bind provisioned users to the IdP subject on first successful OIDC login.
+        provisional = user.auth_provider_id.startswith(("dev:", "test:", "local:"))
+        if provisional or not user.auth_provider_id:
+            user.auth_provider_id = provider_id
+    return _session_response(db, context)
+
+
+@router.get("/auth/me", response_model=AuthMeRead)
+def auth_me(db: Db, context: Auth) -> AuthMeRead:
+    user = db.get(User, context.user_id)
+    return AuthMeRead(
+        user_id=context.user_id,
+        organization_id=context.organization_id,
+        email=context.email,
+        display_name=user.display_name if user else None,
+        permissions=sorted(context.permissions),
+        branch_ids=sorted(context.branch_ids),
+        is_organization_scoped=context.is_organization_scoped,
+    )
 
 
 @router.get("/analyzers", response_model=Page[AnalyzerRead])
