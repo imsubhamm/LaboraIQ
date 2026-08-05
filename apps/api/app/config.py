@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     environment: str = "development"
-    database_url: str = "sqlite:///./laboraiq.db"
+    database_url: str
     dev_auth_enabled: bool = True
     dev_auth_user_email: str = "admin@dev.labora.local"
     dev_auth_organization_code: str = "DEVLAB"

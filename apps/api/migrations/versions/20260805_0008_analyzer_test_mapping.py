@@ -21,7 +21,11 @@ def upgrade() -> None:
         sa.Column("analyzer_id", sa.Uuid(), nullable=False),
         sa.Column("test_id", sa.Uuid(), nullable=False),
         sa.Column("machine_test_code", sa.String(100), nullable=False),
-        sa.Column("status", sa.Enum("active", "inactive", name="status"), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum("active", "inactive", name="analyzer_test_mapping_status"),
+            nullable=False,
+        ),
         sa.Column("created_by", sa.Uuid(), nullable=True),
         sa.Column("updated_by", sa.Uuid(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

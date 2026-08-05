@@ -30,7 +30,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "status",
-            sa.Enum("active", "inactive", name="status"),
+            sa.Enum("active", "inactive", name="analyzer_status"),
             nullable=False,
             server_default="active",
         ),
