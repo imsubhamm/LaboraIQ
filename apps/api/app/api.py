@@ -22,6 +22,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.analyzer_orders import create_queued_attempt, process_queued_orders
 from app.audit import record_event
 from app.auth import AuthContext, require_permission
 from app.config import get_settings
@@ -29,6 +30,7 @@ from app.database import get_db
 from app.models import (
     Analyzer,
     AnalyzerConnectionEvent,
+    AnalyzerOrderAttempt,
     AnalyzerParameterMapping,
     AnalyzerTestMapping,
     AnalyzerWorklistItem,
@@ -55,6 +57,8 @@ from app.schemas import (
     AnalyzerConnectionTestRead,
     AnalyzerCreate,
     AnalyzerMappingStatusUpdate,
+    AnalyzerOrderAttemptRead,
+    AnalyzerOrderProcessRead,
     AnalyzerRead,
     AnalyzerTestMappingCreate,
     AnalyzerTestMappingRead,
@@ -2234,6 +2238,12 @@ def worklist_item_read(db: Session, item: AnalyzerWorklistItem) -> AnalyzerWorkl
     order = db.get(LabOrder, item.order_id)
     test = db.get(TestCatalogItem, item.test_id)
     analyzer = db.get(Analyzer, item.analyzer_id)
+    latest_attempt = db.scalar(
+        select(AnalyzerOrderAttempt)
+        .where(AnalyzerOrderAttempt.worklist_item_id == item.id)
+        .order_by(AnalyzerOrderAttempt.attempt_no.desc(), AnalyzerOrderAttempt.id.desc())
+        .limit(1)
+    )
     return AnalyzerWorklistRead(
         id=item.id,
         specimen_id=item.specimen_id,
@@ -2252,6 +2262,8 @@ def worklist_item_read(db: Session, item: AnalyzerWorklistItem) -> AnalyzerWorkl
         status=item.status,
         correlation_id=item.correlation_id,
         cancelled_reason=item.cancelled_reason,
+        latest_attempt_no=latest_attempt.attempt_no if latest_attempt else None,
+        latest_attempt_state=latest_attempt.state if latest_attempt else None,
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
@@ -2318,6 +2330,12 @@ def enqueue_analyzer_worklist_item(
     previous = {"status": item.status}
     item.status = "queued"
     item.updated_by = context.user_id
+    attempt = create_queued_attempt(
+        db,
+        worklist_item=item,
+        correlation_id=request.state.correlation_id,
+        user_id=context.user_id,
+    )
     record_event(
         db,
         request,
@@ -2328,7 +2346,7 @@ def enqueue_analyzer_worklist_item(
         branch_id=item.branch_id,
         action="enqueue",
         previous=previous,
-        new={"status": "queued"},
+        new={"status": "queued", "attempt_id": str(attempt.id), "attempt_no": attempt.attempt_no},
     )
     commit(db)
     return worklist_item_read(db, item)
@@ -2361,6 +2379,16 @@ def cancel_analyzer_worklist_item(
     item.status = "cancelled"
     item.cancelled_reason = payload.reason.strip() if payload.reason else None
     item.updated_by = context.user_id
+    open_attempts = db.scalars(
+        select(AnalyzerOrderAttempt).where(
+            AnalyzerOrderAttempt.worklist_item_id == item.id,
+            AnalyzerOrderAttempt.state.in_(("queued", "sending")),
+        )
+    ).all()
+    for attempt in open_attempts:
+        attempt.state = "failed"
+        attempt.error = "Cancelled from worklist"
+        attempt.finished_at = datetime.now(UTC)
     record_event(
         db,
         request,
@@ -2375,3 +2403,74 @@ def cancel_analyzer_worklist_item(
     )
     commit(db)
     return worklist_item_read(db, item)
+
+
+def order_attempt_read(attempt: AnalyzerOrderAttempt) -> AnalyzerOrderAttemptRead:
+    return AnalyzerOrderAttemptRead(
+        id=attempt.id,
+        worklist_item_id=attempt.worklist_item_id,
+        analyzer_id=attempt.analyzer_id,
+        attempt_no=attempt.attempt_no,
+        state=attempt.state,
+        correlation_id=attempt.correlation_id,
+        payload_hash=attempt.payload_hash,
+        request_message_id=attempt.request_message_id,
+        response_message_id=attempt.response_message_id,
+        error=attempt.error,
+        started_at=attempt.started_at,
+        finished_at=attempt.finished_at,
+        created_at=attempt.created_at,
+        updated_at=attempt.updated_at,
+    )
+
+
+@router.get("/analyzer-orders/attempts", response_model=Page[AnalyzerOrderAttemptRead])
+def list_analyzer_order_attempts(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    state: Annotated[str | None, Query(max_length=30)] = None,
+    worklist_item_id: uuid.UUID | None = None,
+) -> Page[AnalyzerOrderAttemptRead]:
+    filters = [AnalyzerOrderAttempt.organization_id == context.organization_id]
+    if not context.is_organization_scoped:
+        filters.append(AnalyzerOrderAttempt.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
+    if state:
+        filters.append(AnalyzerOrderAttempt.state == state.strip().lower())
+    if worklist_item_id:
+        filters.append(AnalyzerOrderAttempt.worklist_item_id == worklist_item_id)
+    rows = db.execute(
+        select(
+            AnalyzerOrderAttempt,
+            func.count(AnalyzerOrderAttempt.id).over().label("total_count"),
+        )
+        .where(*filters)
+        .order_by(AnalyzerOrderAttempt.created_at.desc(), AnalyzerOrderAttempt.attempt_no.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    total = rows[0].total_count if rows else 0
+    if not rows and offset:
+        total = db.scalar(select(func.count(AnalyzerOrderAttempt.id)).where(*filters)) or 0
+    return Page[AnalyzerOrderAttemptRead](
+        items=[order_attempt_read(item) for item, _ in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/analyzer-orders/process", response_model=AnalyzerOrderProcessRead)
+def process_analyzer_order_queue(
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> AnalyzerOrderProcessRead:
+    attempts = process_queued_orders(db, request, context, limit=limit)
+    commit(db)
+    return AnalyzerOrderProcessRead(
+        processed=len(attempts),
+        attempts=[order_attempt_read(item) for item in attempts],
+    )

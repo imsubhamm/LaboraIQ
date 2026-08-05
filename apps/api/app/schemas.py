@@ -334,12 +334,46 @@ class AnalyzerWorklistRead(APIModel):
     status: str
     correlation_id: str
     cancelled_reason: str | None
+    latest_attempt_no: int | None = None
+    latest_attempt_state: str | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class AnalyzerWorklistCancel(APIModel):
     reason: str | None = Field(default=None, max_length=200)
+
+
+class AnalyzerMessageRead(APIModel):
+    id: uuid.UUID
+    direction: str
+    content_type: str
+    body: str
+    payload_hash: str
+    correlation_id: str
+    created_at: datetime
+
+
+class AnalyzerOrderAttemptRead(APIModel):
+    id: uuid.UUID
+    worklist_item_id: uuid.UUID
+    analyzer_id: uuid.UUID
+    attempt_no: int
+    state: str
+    correlation_id: str
+    payload_hash: str | None
+    request_message_id: uuid.UUID | None
+    response_message_id: uuid.UUID | None
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalyzerOrderProcessRead(APIModel):
+    processed: int
+    attempts: list[AnalyzerOrderAttemptRead]
 
 
 class AnalyzerMappingStatusUpdate(APIModel):
