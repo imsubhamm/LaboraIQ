@@ -152,6 +152,8 @@ export default function AnalyzerWorklistPage() {
               <option value="pending">Pending</option>
               <option value="queued">Queued</option>
               <option value="in_flight">In flight</option>
+              <option value="awaiting_result">Awaiting result</option>
+              <option value="result_received">Result received</option>
               <option value="failed">Failed</option>
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>

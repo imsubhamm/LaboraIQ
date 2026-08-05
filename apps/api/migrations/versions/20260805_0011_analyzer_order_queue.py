@@ -32,7 +32,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["worklist_item_id"], ["analyzer_worklist_items.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_analyzer_messages_organization_id", "analyzer_messages", ["organization_id"])
+    op.create_index(
+        "ix_analyzer_messages_organization_id", "analyzer_messages", ["organization_id"]
+    )
     op.create_index("ix_analyzer_messages_analyzer_id", "analyzer_messages", ["analyzer_id"])
     op.create_index(
         "ix_analyzer_messages_worklist_item_id", "analyzer_messages", ["worklist_item_id"]
@@ -80,7 +82,9 @@ def upgrade() -> None:
         "analyzer_order_attempts",
         ["organization_id"],
     )
-    op.create_index("ix_analyzer_order_attempts_branch_id", "analyzer_order_attempts", ["branch_id"])
+    op.create_index(
+        "ix_analyzer_order_attempts_branch_id", "analyzer_order_attempts", ["branch_id"]
+    )
     op.create_index(
         "ix_analyzer_order_attempts_worklist_item_id",
         "analyzer_order_attempts",
