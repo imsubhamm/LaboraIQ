@@ -55,8 +55,7 @@ def _load_context_for_user(db: Session, request: Request, user: User) -> AuthCon
         branch_ids=frozenset(branch_id for _, branch_id, _ in rows if branch_id),
         permissions=frozenset(permissions),
         is_organization_scoped=any(
-            assignment_id is not None and branch_id is None
-            for assignment_id, branch_id, _ in rows
+            assignment_id is not None and branch_id is None for assignment_id, branch_id, _ in rows
         ),
     )
 

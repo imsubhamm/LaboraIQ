@@ -12,20 +12,25 @@ type OidcMetadata = {
   authorization_endpoint?: string | null;
 };
 
+function reasonFromSearch(): string {
+  if (typeof window === "undefined") return "";
+  const nextReason = new URLSearchParams(window.location.search).get("reason");
+  if (nextReason === "expired") return "Your session expired. Please sign in again.";
+  if (nextReason?.startsWith("oidc_")) {
+    return "Single sign-on failed. Try again or use administrator credentials.";
+  }
+  return "";
+}
+
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [oidcEnabled, setOidcEnabled] = useState(false);
-  const [reason, setReason] = useState("");
+  const [reason] = useState(reasonFromSearch);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const nextReason = params.get("reason");
-    if (nextReason === "expired") setReason("Your session expired. Please sign in again.");
-    else if (nextReason?.startsWith("oidc_")) setReason("Single sign-on failed. Try again or use administrator credentials.");
-
     const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
     fetch(`${apiBase}/auth/oidc/metadata`)
       .then(async (response) => {
