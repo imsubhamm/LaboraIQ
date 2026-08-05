@@ -165,7 +165,10 @@ class AnalyzerParameterMapping(Base, TimestampMixin):
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("organization_id", "email", name="uq_user_org_email"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "email", name="uq_user_org_email"),
+        Index("ix_users_email", "email"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     email: Mapped[str] = mapped_column(String(320))
@@ -206,6 +209,7 @@ class RolePermission(Base):
 
 class UserRoleAssignment(Base, TimestampMixin):
     __tablename__ = "user_role_assignments"
+    __table_args__ = (Index("ix_ura_user_org_active", "user_id", "organization_id", "active"),)
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     branch_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("branches.id"), index=True)
@@ -247,6 +251,8 @@ class Patient(Base, TimestampMixin):
     __tablename__ = "patients"
     __table_args__ = (
         UniqueConstraint("organization_id", "patient_number", name="uq_patient_number"),
+        Index("ix_patients_org_updated", "organization_id", "updated_at"),
+        Index("ix_patients_email", "email"),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
@@ -460,7 +466,10 @@ class LabResultObservation(Base, TimestampMixin):
 
 class LabOrder(Base, TimestampMixin):
     __tablename__ = "lab_orders"
-    __table_args__ = (UniqueConstraint("organization_id", "order_number", name="uq_order_number"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "order_number", name="uq_order_number"),
+        Index("ix_lab_orders_org_patient", "organization_id", "patient_id"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
@@ -505,7 +514,10 @@ class Invoice(Base, TimestampMixin):
 
 class Specimen(Base, TimestampMixin):
     __tablename__ = "specimens"
-    __table_args__ = (UniqueConstraint("organization_id", "barcode", name="uq_specimen_barcode"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "barcode", name="uq_specimen_barcode"),
+        Index("ix_specimens_org_status_updated", "organization_id", "status", "updated_at"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)

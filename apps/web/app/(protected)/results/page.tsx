@@ -55,9 +55,9 @@ export default function ResultsPage() {
   const [selected, setSelected] = useState<LabResult | null>(null);
   const [notes, setNotes] = useState("");
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: { soft?: boolean }) => {
     try {
-      setLoading(true);
+      if (!options?.soft) setLoading(true);
       const query = new URLSearchParams({ limit: "50", offset: "0" });
       if (status) query.set("status", status);
       const page = await api<Page<LabResult>>(`/results?${query}`);
@@ -90,7 +90,7 @@ export default function ResultsPage() {
       });
       setSelected(updated);
       setNotes("");
-      await load();
+      await load({ soft: true });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to update result");
     } finally {
@@ -108,7 +108,8 @@ export default function ResultsPage() {
         {
           headers: token
             ? { Authorization: `Bearer ${token}` }
-            : process.env.NEXT_PUBLIC_DEV_AUTH_HEADER === "true"
+            : process.env.NODE_ENV === "development" &&
+                process.env.NEXT_PUBLIC_DEV_AUTH_HEADER === "true"
               ? {
                   "X-Dev-User-Email":
                     process.env.NEXT_PUBLIC_DEV_AUTH_EMAIL?.trim() || "admin@dev.labora.local"
@@ -170,7 +171,7 @@ export default function ResultsPage() {
           </label>
           <span>{total} results</span>
         </div>
-        {loading ? (
+        {loading && items.length === 0 ? (
           <div className="loading">
             <i />
             <i />
