@@ -34,9 +34,7 @@ def upgrade() -> None:
         "analyzers",
         sa.Column("heartbeat_interval_seconds", sa.Integer(), nullable=False, server_default="60"),
     )
-    op.add_column(
-        "analyzers", sa.Column("last_connection_test_at", sa.DateTime(timezone=True))
-    )
+    op.add_column("analyzers", sa.Column("last_connection_test_at", sa.DateTime(timezone=True)))
     op.add_column("analyzers", sa.Column("last_connected_at", sa.DateTime(timezone=True)))
     op.add_column("analyzers", sa.Column("last_connection_error", sa.String(500)))
     op.create_table(
