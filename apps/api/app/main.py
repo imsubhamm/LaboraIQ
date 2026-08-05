@@ -54,6 +54,7 @@ async def request_context(
     response = await call_next(request)
     authenticated_user = getattr(request.state, "auth", None)
     if response.status_code == 403 and isinstance(authenticated_user, User):
+        # Request-scoped get_db may already be closed after call_next; use a short-lived session.
         with SessionLocal() as audit_db:
             audit_db.add(
                 AuditEvent(

@@ -417,6 +417,7 @@ def probe_analyzer_connection(
     final_latency: int | None = None
     final_message = "Connection failed"
     attempts = analyzer.retry_limit + 1
+    probe_events: list[AnalyzerConnectionEvent] = []
     for attempt in range(1, attempts + 1):
         started = time.monotonic()
         try:
@@ -429,7 +430,7 @@ def probe_analyzer_connection(
         except OSError as error:
             final_latency = max(0, round((time.monotonic() - started) * 1000))
             final_message = str(error)[:500] or error.__class__.__name__
-        db.add(
+        probe_events.append(
             AnalyzerConnectionEvent(
                 organization_id=context.organization_id,
                 branch_id=analyzer.branch_id,
@@ -446,6 +447,8 @@ def probe_analyzer_connection(
         if final_success:
             attempts = attempt
             break
+    for event in probe_events:
+        db.add(event)
     analyzer.connection_status = "connected" if final_success else "error"
     analyzer.last_connection_error = None if final_success else final_message
     if final_success:
@@ -1661,16 +1664,6 @@ def list_patients(
     offset: Annotated[int, Query(ge=0)] = 0,
     search: Annotated[str | None, Query(max_length=200)] = None,
 ) -> Page[PatientLookupRead]:
-    visit_summary = (
-        select(
-            LabOrder.patient_id.label("patient_id"),
-            func.count(LabOrder.id).label("visit_count"),
-            func.max(LabOrder.created_at).label("last_visit_at"),
-        )
-        .where(LabOrder.organization_id == context.organization_id)
-        .group_by(LabOrder.patient_id)
-        .subquery()
-    )
     filters = [Patient.organization_id == context.organization_id]
     if search:
         term = f"%{search.strip().lower()}%"
@@ -1682,24 +1675,35 @@ def list_patients(
                 func.lower(Patient.email).like(term),
             )
         )
-    rows = db.execute(
-        select(
-            Patient,
-            func.coalesce(visit_summary.c.visit_count, 0),
-            visit_summary.c.last_visit_at,
-            func.count(Patient.id).over().label("total_count"),
-        )
-        .outerjoin(visit_summary, visit_summary.c.patient_id == Patient.id)
-        .where(*filters)
-        .order_by(Patient.updated_at.desc(), Patient.id.desc())
-        .limit(limit)
-        .offset(offset)
-    ).all()
-    total = rows[0].total_count if rows else 0
-    if not rows and offset:
-        total = db.scalar(select(func.count(Patient.id)).where(*filters)) or 0
+    total = db.scalar(select(func.count(Patient.id)).where(*filters)) or 0
+    patients = list(
+        db.scalars(
+            select(Patient)
+            .where(*filters)
+            .order_by(Patient.updated_at.desc(), Patient.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    visit_counts: dict[uuid.UUID, tuple[int, datetime | None]] = {}
+    if patients:
+        patient_ids = [patient.id for patient in patients]
+        for patient_id, visit_count, last_visit_at in db.execute(
+            select(
+                LabOrder.patient_id,
+                func.count(LabOrder.id),
+                func.max(LabOrder.created_at),
+            )
+            .where(
+                LabOrder.organization_id == context.organization_id,
+                LabOrder.patient_id.in_(patient_ids),
+            )
+            .group_by(LabOrder.patient_id)
+        ).all():
+            visit_counts[patient_id] = (int(visit_count), last_visit_at)
     items: list[PatientLookupRead] = []
-    for patient, visit_count, last_visit_at, _ in rows:
+    for patient in patients:
+        visit_count, last_visit_at = visit_counts.get(patient.id, (0, None))
         items.append(
             PatientLookupRead.model_validate(
                 {
@@ -2036,9 +2040,15 @@ def record_payment(
     )
 
 
-def specimen_workflow_read(db: Session, specimen: Specimen) -> SpecimenWorkflowRead:
-    order = db.get(LabOrder, specimen.order_id)
-    patient = db.get(Patient, order.patient_id) if order else None
+def specimen_workflow_read(
+    db: Session,
+    specimen: Specimen,
+    *,
+    order: LabOrder | None = None,
+    patient: Patient | None = None,
+) -> SpecimenWorkflowRead:
+    order = order or db.get(LabOrder, specimen.order_id)
+    patient = patient or (db.get(Patient, order.patient_id) if order else None)
     if order is None or patient is None:
         raise HTTPException(status_code=404, detail="Specimen order was not found")
     return SpecimenWorkflowRead(
@@ -2085,21 +2095,16 @@ def list_specimens(
     department: Annotated[str | None, Query(max_length=120)] = None,
     search: Annotated[str | None, Query(max_length=200)] = None,
 ) -> Page[SpecimenWorkflowRead]:
-    statement = (
-        select(Specimen)
-        .join(LabOrder, LabOrder.id == Specimen.order_id)
-        .join(Patient, Patient.id == LabOrder.patient_id)
-        .where(Specimen.organization_id == context.organization_id)
-    )
+    filters = [Specimen.organization_id == context.organization_id]
     if not context.is_organization_scoped:
-        statement = statement.where(Specimen.branch_id.in_(context.branch_ids))
+        filters.append(Specimen.branch_id.in_(context.branch_ids))
     if specimen_status:
-        statement = statement.where(Specimen.status == specimen_status)
+        filters.append(Specimen.status == specimen_status)
     if department:
-        statement = statement.where(Specimen.laboratory_department == department)
+        filters.append(Specimen.laboratory_department == department)
     if search:
         term = f"%{search.strip().lower()}%"
-        statement = statement.where(
+        filters.append(
             or_(
                 func.lower(Specimen.barcode).like(term),
                 func.lower(Specimen.accession_number).like(term),
@@ -2108,16 +2113,30 @@ def list_specimens(
                 func.lower(Patient.full_name).like(term),
             )
         )
-    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
-    records = list(
-        db.scalars(
-            statement.order_by(Specimen.updated_at.desc(), Specimen.id.desc())
-            .limit(limit)
-            .offset(offset)
-        ).all()
+    base = (
+        select(Specimen, LabOrder, Patient)
+        .join(LabOrder, LabOrder.id == Specimen.order_id)
+        .join(Patient, Patient.id == LabOrder.patient_id)
+        .where(*filters)
     )
+    total = (
+        db.scalar(
+            select(func.count(Specimen.id))
+            .select_from(Specimen)
+            .join(LabOrder, LabOrder.id == Specimen.order_id)
+            .join(Patient, Patient.id == LabOrder.patient_id)
+            .where(*filters)
+        )
+        or 0
+    )
+    rows = db.execute(
+        base.order_by(Specimen.updated_at.desc(), Specimen.id.desc()).limit(limit).offset(offset)
+    ).all()
     return Page[SpecimenWorkflowRead](
-        items=[specimen_workflow_read(db, item) for item in records],
+        items=[
+            specimen_workflow_read(db, specimen, order=order, patient=patient)
+            for specimen, order, patient in rows
+        ],
         total=total,
         limit=limit,
         offset=offset,
@@ -2334,17 +2353,27 @@ def enqueue_analyzer_worklist_for_specimen(
     return created
 
 
-def worklist_item_read(db: Session, item: AnalyzerWorklistItem) -> AnalyzerWorklistRead:
-    specimen = db.get(Specimen, item.specimen_id)
-    order = db.get(LabOrder, item.order_id)
-    test = db.get(TestCatalogItem, item.test_id)
-    analyzer = db.get(Analyzer, item.analyzer_id)
-    latest_attempt = db.scalar(
-        select(AnalyzerOrderAttempt)
-        .where(AnalyzerOrderAttempt.worklist_item_id == item.id)
-        .order_by(AnalyzerOrderAttempt.attempt_no.desc(), AnalyzerOrderAttempt.id.desc())
-        .limit(1)
-    )
+def worklist_item_read(
+    db: Session,
+    item: AnalyzerWorklistItem,
+    *,
+    specimen: Specimen | None = None,
+    order: LabOrder | None = None,
+    test: TestCatalogItem | None = None,
+    analyzer: Analyzer | None = None,
+    latest_attempt: AnalyzerOrderAttempt | None = None,
+) -> AnalyzerWorklistRead:
+    specimen = specimen or db.get(Specimen, item.specimen_id)
+    order = order or db.get(LabOrder, item.order_id)
+    test = test or db.get(TestCatalogItem, item.test_id)
+    analyzer = analyzer or db.get(Analyzer, item.analyzer_id)
+    if latest_attempt is None:
+        latest_attempt = db.scalar(
+            select(AnalyzerOrderAttempt)
+            .where(AnalyzerOrderAttempt.worklist_item_id == item.id)
+            .order_by(AnalyzerOrderAttempt.attempt_no.desc(), AnalyzerOrderAttempt.id.desc())
+            .limit(1)
+        )
     return AnalyzerWorklistRead(
         id=item.id,
         specimen_id=item.specimen_id,
@@ -2386,21 +2415,72 @@ def list_analyzer_worklist(
         filters.append(AnalyzerWorklistItem.status == status_filter.strip().lower())
     if analyzer_id:
         filters.append(AnalyzerWorklistItem.analyzer_id == analyzer_id)
-    rows = db.execute(
-        select(
-            AnalyzerWorklistItem,
-            func.count(AnalyzerWorklistItem.id).over().label("total_count"),
+    total = db.scalar(select(func.count(AnalyzerWorklistItem.id)).where(*filters)) or 0
+    items = list(
+        db.scalars(
+            select(AnalyzerWorklistItem)
+            .where(*filters)
+            .order_by(AnalyzerWorklistItem.created_at.desc(), AnalyzerWorklistItem.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    if not items:
+        return Page[AnalyzerWorklistRead](items=[], total=total, limit=limit, offset=offset)
+
+    specimen_map = {
+        row.id: row
+        for row in db.scalars(
+            select(Specimen).where(Specimen.id.in_({item.specimen_id for item in items}))
+        ).all()
+    }
+    order_map = {
+        row.id: row
+        for row in db.scalars(
+            select(LabOrder).where(LabOrder.id.in_({item.order_id for item in items}))
+        ).all()
+    }
+    test_map = {
+        row.id: row
+        for row in db.scalars(
+            select(TestCatalogItem).where(TestCatalogItem.id.in_({item.test_id for item in items}))
+        ).all()
+    }
+    analyzer_map = {
+        row.id: row
+        for row in db.scalars(
+            select(Analyzer).where(Analyzer.id.in_({item.analyzer_id for item in items}))
+        ).all()
+    }
+    latest_attempts: dict[uuid.UUID, AnalyzerOrderAttempt] = {}
+    for attempt in db.scalars(
+        select(AnalyzerOrderAttempt)
+        .where(AnalyzerOrderAttempt.worklist_item_id.in_({item.id for item in items}))
+        .order_by(
+            AnalyzerOrderAttempt.worklist_item_id.asc(),
+            AnalyzerOrderAttempt.attempt_no.desc(),
+            AnalyzerOrderAttempt.id.desc(),
         )
-        .where(*filters)
-        .order_by(AnalyzerWorklistItem.created_at.desc(), AnalyzerWorklistItem.id.desc())
-        .limit(limit)
-        .offset(offset)
-    ).all()
-    total = rows[0].total_count if rows else 0
-    if not rows and offset:
-        total = db.scalar(select(func.count(AnalyzerWorklistItem.id)).where(*filters)) or 0
-    items = [worklist_item_read(db, item) for item, _ in rows]
-    return Page[AnalyzerWorklistRead](items=items, total=total, limit=limit, offset=offset)
+    ).all():
+        latest_attempts.setdefault(attempt.worklist_item_id, attempt)
+
+    return Page[AnalyzerWorklistRead](
+        items=[
+            worklist_item_read(
+                db,
+                item,
+                specimen=specimen_map.get(item.specimen_id),
+                order=order_map.get(item.order_id),
+                test=test_map.get(item.test_id),
+                analyzer=analyzer_map.get(item.analyzer_id),
+                latest_attempt=latest_attempts.get(item.id),
+            )
+            for item in items
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(
@@ -2577,12 +2657,21 @@ def process_analyzer_order_queue(
     )
 
 
-def lab_result_read(db: Session, result: LabResult) -> LabResultRead:
-    specimen = db.get(Specimen, result.specimen_id)
-    order = db.get(LabOrder, result.order_id)
-    patient = db.get(Patient, order.patient_id) if order else None
-    test = db.get(TestCatalogItem, result.test_id)
-    analyzer = db.get(Analyzer, result.analyzer_id)
+def lab_result_read(
+    db: Session,
+    result: LabResult,
+    *,
+    specimen: Specimen | None = None,
+    order: LabOrder | None = None,
+    patient: Patient | None = None,
+    test: TestCatalogItem | None = None,
+    analyzer: Analyzer | None = None,
+) -> LabResultRead:
+    specimen = specimen or db.get(Specimen, result.specimen_id)
+    order = order or db.get(LabOrder, result.order_id)
+    patient = patient or (db.get(Patient, order.patient_id) if order else None)
+    test = test or db.get(TestCatalogItem, result.test_id)
+    analyzer = analyzer or db.get(Analyzer, result.analyzer_id)
     return LabResultRead(
         id=result.id,
         worklist_item_id=result.worklist_item_id,
@@ -2640,18 +2729,66 @@ def list_lab_results(
         filters.append(LabResult.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
     if status_filter:
         filters.append(LabResult.status == status_filter.strip().lower())
-    rows = db.execute(
-        select(LabResult, func.count(LabResult.id).over().label("total_count"))
-        .where(*filters)
-        .order_by(LabResult.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    ).all()
-    total = rows[0].total_count if rows else 0
-    if not rows and offset:
-        total = db.scalar(select(func.count(LabResult.id)).where(*filters)) or 0
+    total = db.scalar(select(func.count(LabResult.id)).where(*filters)) or 0
+    results = list(
+        db.scalars(
+            select(LabResult)
+            .where(*filters)
+            .order_by(LabResult.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    if not results:
+        return Page[LabResultRead](items=[], total=total, limit=limit, offset=offset)
+
+    specimen_map = {
+        row.id: row
+        for row in db.scalars(
+            select(Specimen).where(Specimen.id.in_({item.specimen_id for item in results}))
+        ).all()
+    }
+    order_map = {
+        row.id: row
+        for row in db.scalars(
+            select(LabOrder).where(LabOrder.id.in_({item.order_id for item in results}))
+        ).all()
+    }
+    patient_ids = {order.patient_id for order in order_map.values()}
+    patient_map = (
+        {
+            row.id: row
+            for row in db.scalars(select(Patient).where(Patient.id.in_(patient_ids))).all()
+        }
+        if patient_ids
+        else {}
+    )
+    test_ids = {item.test_id for item in results}
+    test_map = {
+        row.id: row
+        for row in db.scalars(select(TestCatalogItem).where(TestCatalogItem.id.in_(test_ids))).all()
+    }
+    analyzer_map = {
+        row.id: row
+        for row in db.scalars(
+            select(Analyzer).where(Analyzer.id.in_({item.analyzer_id for item in results}))
+        ).all()
+    }
     return Page[LabResultRead](
-        items=[lab_result_read(db, item) for item, _ in rows],
+        items=[
+            lab_result_read(
+                db,
+                item,
+                specimen=specimen_map.get(item.specimen_id),
+                order=order_map.get(item.order_id),
+                patient=patient_map.get(order_map[item.order_id].patient_id)
+                if item.order_id in order_map
+                else None,
+                test=test_map.get(item.test_id),
+                analyzer=analyzer_map.get(item.analyzer_id),
+            )
+            for item in results
+        ],
         total=total,
         limit=limit,
         offset=offset,
