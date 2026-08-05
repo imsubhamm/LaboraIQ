@@ -835,9 +835,9 @@ def test_order_queue_sends_stub_payload_retries_then_fails(
 
     calls = {"n": 0}
 
-    def fail_send(analyzer_obj, payload: str):
+    def fail_send(analyzer_obj, payload: str, **kwargs):
         calls["n"] += 1
-        return False, "connection refused", None
+        return False, "connection refused", []
 
     import app.analyzer_orders as orders
 
@@ -880,10 +880,10 @@ def test_order_queue_marks_acknowledged_on_tcp_success(
         "/api/v1/analyzers",
         json={
             "branch_id": str(branch.id),
-            "code": "MAC-UAT-01",
+            "code": "MAC-STUB-01",
             "vendor": "LaboraIQ",
-            "model": "Mac Simulator",
-            "protocol": "HL7_LAW",
+            "model": "Stub Simulator",
+            "protocol": "PROPRIETARY",
             "host": "192.168.10.80",
             "port": 55001,
             "connection_mode": "bidirectional",
@@ -936,7 +936,7 @@ def test_order_queue_marks_acknowledged_on_tcp_success(
     monkeypatch.setattr(
         orders,
         "send_order_over_tcp",
-        lambda analyzer_obj, payload: (True, "TCP order payload delivered", None),
+        lambda analyzer_obj, payload, **kwargs: (True, "TCP order payload delivered", []),
     )
     processed = client.post("/api/v1/analyzer-orders/process")
     assert processed.status_code == 200
@@ -945,3 +945,262 @@ def test_order_queue_marks_acknowledged_on_tcp_success(
     item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
     assert item["status"] == "completed"
     assert item["latest_attempt_state"] == "acknowledged"
+
+
+def test_hl7_law_order_requires_ack_and_stores_oru(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+) -> None:
+    import importlib.util
+    import socket
+    import threading
+    import uuid as uuid_mod
+    from pathlib import Path
+
+    from app.models import AnalyzerMessage
+    from sqlalchemy import select
+
+    simulator_path = Path(__file__).resolve().parents[3] / "tools" / "analyzer_tcp_simulator.py"
+    spec = importlib.util.spec_from_file_location("analyzer_tcp_simulator", simulator_path)
+    assert spec and spec.loader
+    simulator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(simulator)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    server.listen()
+    stop = threading.Event()
+
+    def serve() -> None:
+        server.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                connection, _ = server.accept()
+            except TimeoutError:
+                continue
+            simulator.handle_connection(
+                connection,
+                analyzer_code="MAC-UAT-01",
+                expected_barcode=None,
+                expected_test_code="A4",
+                send_result=True,
+                result_value="1.8",
+                result_unit="ng/mL",
+                observation_code="ANDRO",
+                timeout=2.0,
+            )
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+        test = TestCatalogItem(
+            organization_id=context.organization_id,
+            code="BIO0231",
+            name="Androstenedione Test",
+            specimen_type="Serum",
+            container_type="SST",
+            price="900.00",
+        )
+        db.add_all([branch, test])
+        db.commit()
+        analyzer = client.post(
+            "/api/v1/analyzers",
+            json={
+                "branch_id": str(branch.id),
+                "code": "MAC-UAT-01",
+                "vendor": "LaboraIQ",
+                "model": "Mac Simulator",
+                "protocol": "HL7_LAW",
+                "host": "127.0.0.1",
+                "port": port,
+                "connection_mode": "bidirectional",
+                "connection_timeout_seconds": 3,
+                "retry_limit": 0,
+            },
+        ).json()
+        assert (
+            client.post(
+                f"/api/v1/analyzers/{analyzer['id']}/mappings",
+                json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+            ).status_code
+            == 201
+        )
+        intake = client.post(
+            "/api/v1/intake-workflows",
+            json={
+                "full_name": "HL7 Patient",
+                "phone": "+919811122266",
+                "email": "hl7@example.com",
+                "age_years": 30,
+                "sex": "Female",
+                "blood_group": "O+",
+                "country": "India",
+                "race": "Asian",
+                "nationality": "Indian",
+                "visit_type": "OP",
+                "department": "Medicine",
+                "ward": "OP Clinic",
+                "doctor_name": "Dr Example",
+                "diagnosis": "Z00.0",
+                "test_ids": [str(test.id)],
+            },
+        ).json()
+        barcode = client.post(
+            f"/api/v1/orders/{intake['order_id']}/payment", json={"payment_method": "CASH"}
+        ).json()["specimens"][0]["barcode"]
+        client.post(
+            f"/api/v1/specimens/{barcode}/collect",
+            json={"collection_location": "OP", "container_count": 1},
+        )
+        client.post(f"/api/v1/specimens/{barcode}/receive")
+        client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"})
+        item_id = client.get("/api/v1/analyzer-worklist", params={"status": "pending"}).json()[
+            "items"
+        ][0]["id"]
+        assert client.post(f"/api/v1/analyzer-worklist/{item_id}/enqueue").status_code == 200
+        processed = client.post("/api/v1/analyzer-orders/process")
+        assert processed.status_code == 200
+        attempt = processed.json()["attempts"][0]
+        assert attempt["state"] == "acknowledged"
+        assert attempt["error"] is None
+        item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
+        assert item["status"] == "result_received"
+        rows = list(
+            db.scalars(
+                select(AnalyzerMessage).where(
+                    AnalyzerMessage.worklist_item_id == uuid_mod.UUID(item_id)
+                )
+            ).all()
+        )
+        assert any("OML^O33" in row.body for row in rows if row.direction == "outbound")
+        assert any("MSA|AA|" in row.body for row in rows if row.direction == "inbound")
+        assert any("ORU^R01" in row.body for row in rows if row.direction == "inbound")
+    finally:
+        stop.set()
+        server.close()
+        thread.join(timeout=2)
+
+
+def test_hl7_law_nak_fails_attempt(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+) -> None:
+    import importlib.util
+    import socket
+    import threading
+    from pathlib import Path
+
+    simulator_path = Path(__file__).resolve().parents[3] / "tools" / "analyzer_tcp_simulator.py"
+    spec = importlib.util.spec_from_file_location("analyzer_tcp_simulator", simulator_path)
+    assert spec and spec.loader
+    simulator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(simulator)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    server.listen()
+    stop = threading.Event()
+
+    def serve() -> None:
+        server.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                connection, _ = server.accept()
+            except TimeoutError:
+                continue
+            simulator.handle_connection(
+                connection,
+                analyzer_code="MAC-UAT-01",
+                expected_barcode=None,
+                expected_test_code="WRONG",
+                send_result=False,
+                result_value="1.8",
+                result_unit="ng/mL",
+                observation_code="ANDRO",
+                timeout=2.0,
+            )
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+        test = TestCatalogItem(
+            organization_id=context.organization_id,
+            code="BIO0231",
+            name="Androstenedione Test",
+            specimen_type="Serum",
+            container_type="SST",
+            price="900.00",
+        )
+        db.add_all([branch, test])
+        db.commit()
+        analyzer = client.post(
+            "/api/v1/analyzers",
+            json={
+                "branch_id": str(branch.id),
+                "code": "MAC-NAK-01",
+                "vendor": "LaboraIQ",
+                "model": "Mac Simulator",
+                "protocol": "HL7_LAW",
+                "host": "127.0.0.1",
+                "port": port,
+                "connection_mode": "bidirectional",
+                "connection_timeout_seconds": 3,
+                "retry_limit": 0,
+            },
+        ).json()
+        client.post(
+            f"/api/v1/analyzers/{analyzer['id']}/mappings",
+            json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+        )
+        intake = client.post(
+            "/api/v1/intake-workflows",
+            json={
+                "full_name": "NAK Patient",
+                "phone": "+919811122277",
+                "email": "nak@example.com",
+                "age_years": 30,
+                "sex": "Male",
+                "blood_group": "A+",
+                "country": "India",
+                "race": "Asian",
+                "nationality": "Indian",
+                "visit_type": "OP",
+                "department": "Medicine",
+                "ward": "OP Clinic",
+                "doctor_name": "Dr Example",
+                "diagnosis": "Z00.0",
+                "test_ids": [str(test.id)],
+            },
+        ).json()
+        barcode = client.post(
+            f"/api/v1/orders/{intake['order_id']}/payment", json={"payment_method": "CASH"}
+        ).json()["specimens"][0]["barcode"]
+        client.post(
+            f"/api/v1/specimens/{barcode}/collect",
+            json={"collection_location": "OP", "container_count": 1},
+        )
+        client.post(f"/api/v1/specimens/{barcode}/receive")
+        client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"})
+        item_id = client.get("/api/v1/analyzer-worklist", params={"status": "pending"}).json()[
+            "items"
+        ][0]["id"]
+        client.post(f"/api/v1/analyzer-worklist/{item_id}/enqueue")
+        processed = client.post("/api/v1/analyzer-orders/process")
+        assert processed.status_code == 200
+        attempt = processed.json()["attempts"][0]
+        assert attempt["state"] == "failed"
+        assert attempt["error"] and "HL7 NAK AE" in attempt["error"]
+        item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
+        assert item["status"] == "failed"
+    finally:
+        stop.set()
+        server.close()
+        thread.join(timeout=2)

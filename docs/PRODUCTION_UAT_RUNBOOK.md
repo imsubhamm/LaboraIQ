@@ -60,19 +60,22 @@ sudo journalctl -u laboraiq-web -n 100 --no-pager
 
 ## Mac analyzer simulator
 
-The current simulator is a connectivity-only TCP listener:
+HL7 LAW MLLP listener (order → ACK → optional ORU):
 
 ```bash
-python3 tools/analyzer_tcp_simulator.py --host 100.122.201.68 --port 55001
+python3 tools/analyzer_tcp_simulator.py --host 100.122.201.68 --port 55001 \
+  --analyzer-code MAC-UAT-01 --expected-test-code A4
 ```
+
+Use `--no-result` for ACK-only. Optional `--expected-barcode` rejects mismatched specimen IDs with MSA AE.
 
 The Mac and EC2 must both be connected to the same Tailscale network. Current analyzer configuration:
 
 - Analyzer code: `MAC-UAT-01`
 - Host: `100.122.201.68`
 - Port: `55001`
-- Mode: bidirectional configuration, but message exchange is not implemented.
-- Current protocol label: vendor proprietary.
+- Protocol: `HL7_LAW`
+- Mode: bidirectional MLLP order/ACK/result exchange for UAT.
 
 ## End-to-end UAT completed so far
 
@@ -119,18 +122,16 @@ BIO0231 -> A4
 
 ## Current stopping point
 
-The current system stops after TCP reachability. It does not yet send the accepted specimen to the simulator.
-
-The next UAT should not be considered successful until all of these are independently demonstrated:
+Order transmission and application ACK/ORU capture are implemented for `HL7_LAW`. The next UAT gate is result normalization and clinical release:
 
 - Worklist created from the accepted specimen.
 - Correct analyzer selected from the active mapping.
-- Order message transmitted.
-- Application-level acknowledgement received.
-- Result message returned.
-- Result matched to the specimen and requested test.
-- Unit and reference range applied.
-- Result reviewed and released.
+- OML^O33 order transmitted over MLLP.
+- Application-level ACK (MSA AA) received.
+- ORU result message returned and stored raw.
+- Result matched/normalized to the specimen and requested test (Phase 4).
+- Unit and reference range applied (Phase 4).
+- Result reviewed and released (Phase 4).
 
 ## Operational cautions
 

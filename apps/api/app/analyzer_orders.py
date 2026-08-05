@@ -1,7 +1,7 @@
-"""Analyzer order queue: attempts, immutable messages, and TCP transport send.
+"""Analyzer order queue: attempts, immutable messages, and TCP/MLLP send.
 
-Phase 2 uses a LaboraIQ stub order payload over TCP. Phase 3 replaces the payload
-builder/parser with HL7 LAW while keeping this queue and message store.
+Phase 3 uses HL7 v2.5.1 OML^O33 over MLLP for analyzers with protocol HL7_LAW.
+Other protocols keep the LaboraIQ stub frame until dedicated adapters exist.
 """
 
 from __future__ import annotations
@@ -17,12 +17,23 @@ from sqlalchemy.orm import Session
 
 from app.audit import record_event
 from app.auth import AuthContext
+from app.hl7_law import (
+    build_oml_o33,
+    is_result_message,
+    parse_ack,
+    read_mllp_messages,
+    unwrap_mllp,
+    wrap_mllp,
+)
 from app.models import (
     Analyzer,
     AnalyzerMessage,
     AnalyzerOrderAttempt,
     AnalyzerWorklistItem,
+    LabOrder,
+    Patient,
     Specimen,
+    TestCatalogItem,
 )
 
 
@@ -37,7 +48,7 @@ def build_stub_order_payload(
     worklist_item: AnalyzerWorklistItem,
     correlation_id: str,
 ) -> str:
-    """Provisional order frame until HL7 LAW is implemented in Phase 3."""
+    """Legacy stub frame for non-HL7 analyzers."""
     return "\n".join(
         [
             "LABORAIQ-ORDER-V0",
@@ -50,6 +61,47 @@ def build_stub_order_payload(
             "END",
         ]
     )
+
+
+def build_order_payload(
+    db: Session,
+    *,
+    specimen: Specimen,
+    analyzer: Analyzer,
+    worklist_item: AnalyzerWorklistItem,
+    correlation_id: str,
+) -> tuple[str, str]:
+    """Return (payload_body, content_type)."""
+    if analyzer.protocol != "HL7_LAW":
+        return (
+            build_stub_order_payload(
+                specimen=specimen,
+                analyzer=analyzer,
+                worklist_item=worklist_item,
+                correlation_id=correlation_id,
+            ),
+            "text/plain; laboraiq-order=v0",
+        )
+
+    order = db.get(LabOrder, worklist_item.order_id)
+    patient = db.get(Patient, order.patient_id) if order else None
+    test = db.get(TestCatalogItem, worklist_item.test_id)
+    if order is None or patient is None or test is None:
+        raise ValueError("Order, patient, or test missing for HL7 order build")
+
+    message = build_oml_o33(
+        analyzer_code=analyzer.code,
+        barcode=specimen.barcode,
+        accession=specimen.accession_number,
+        machine_test_code=worklist_item.machine_test_code,
+        test_name=test.name,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        patient_sex=patient.sex,
+        order_number=order.order_number,
+        correlation_id=correlation_id,
+    )
+    return message, "application/hl7-v2; profile=LAW; type=OML^O33"
 
 
 def next_attempt_number(db: Session, worklist_item_id: uuid.UUID) -> int:
@@ -111,23 +163,55 @@ def store_message(
     return message
 
 
-def send_order_over_tcp(analyzer: Analyzer, payload: str) -> tuple[bool, str, str | None]:
-    """Send stub order bytes. Returns (success, detail, optional inbound body)."""
+def send_order_over_tcp(
+    analyzer: Analyzer,
+    payload: str,
+    *,
+    use_mllp: bool = False,
+) -> tuple[bool, str, list[str]]:
+    """Send order bytes. Returns (transport_ok, detail, inbound HL7/plain messages)."""
     try:
         with socket.create_connection(
             (analyzer.host, analyzer.port),
             timeout=analyzer.connection_timeout_seconds,
         ) as connection:
-            connection.sendall(payload.encode("utf-8"))
-            connection.settimeout(min(2, max(1, analyzer.connection_timeout_seconds)))
+            outbound = wrap_mllp(payload) if use_mllp else payload.encode("utf-8")
+            connection.sendall(outbound)
+            read_timeout = min(5.0, max(1.0, float(analyzer.connection_timeout_seconds)))
+            connection.settimeout(read_timeout)
+            if use_mllp:
+                inbound_messages = read_mllp_messages(
+                    connection.recv,
+                    timeout_seconds=read_timeout,
+                    max_messages=2,
+                )
+                # Brief second window for a follow-up ORU if only ACK arrived.
+                if len(inbound_messages) == 1:
+                    connection.settimeout(min(1.0, read_timeout))
+                    more = read_mllp_messages(
+                        connection.recv,
+                        timeout_seconds=1.0,
+                        max_messages=1,
+                        idle_rounds=1,
+                    )
+                    inbound_messages.extend(more)
+                if not inbound_messages:
+                    return False, "No MLLP ACK received from analyzer", []
+                return True, "MLLP exchange completed", inbound_messages
+
             try:
                 inbound = connection.recv(4096)
             except TimeoutError:
                 inbound = b""
-            inbound_text = inbound.decode("utf-8", errors="replace") if inbound else None
-            return True, "TCP order payload delivered", inbound_text
+            if inbound:
+                framed = unwrap_mllp(inbound)
+                if framed:
+                    return True, "TCP order payload delivered", framed
+                text = inbound.decode("utf-8", errors="replace")
+                return True, "TCP order payload delivered", [text]
+            return True, "TCP order payload delivered", []
     except OSError as error:
-        return False, (str(error)[:500] or error.__class__.__name__), None
+        return False, (str(error)[:500] or error.__class__.__name__), []
 
 
 def process_order_attempt(
@@ -154,12 +238,23 @@ def process_order_attempt(
     worklist_item.updated_by = context.user_id
     db.flush()
 
-    payload = build_stub_order_payload(
-        specimen=specimen,
-        analyzer=analyzer,
-        worklist_item=worklist_item,
-        correlation_id=attempt.correlation_id,
-    )
+    try:
+        payload, content_type = build_order_payload(
+            db,
+            specimen=specimen,
+            analyzer=analyzer,
+            worklist_item=worklist_item,
+            correlation_id=attempt.correlation_id,
+        )
+    except ValueError as error:
+        attempt.state = "failed"
+        attempt.error = str(error)[:500]
+        attempt.finished_at = datetime.now(UTC)
+        worklist_item.status = "failed"
+        worklist_item.updated_by = context.user_id
+        return attempt
+
+    use_mllp = analyzer.protocol == "HL7_LAW"
     request_message = store_message(
         db,
         organization_id=attempt.organization_id,
@@ -169,14 +264,19 @@ def process_order_attempt(
         direction="outbound",
         body=payload,
         correlation_id=attempt.correlation_id,
-        content_type="text/plain; laboraiq-order=v0",
+        content_type=content_type,
     )
     attempt.request_message_id = request_message.id
     attempt.payload_hash = request_message.payload_hash
 
-    success, detail, inbound = send_order_over_tcp(analyzer, payload)
-    if inbound:
-        response_message = store_message(
+    transport_ok, detail, inbound_messages = send_order_over_tcp(
+        analyzer, payload, use_mllp=use_mllp
+    )
+
+    ack_message: str | None = None
+    result_message: str | None = None
+    for inbound in inbound_messages:
+        stored = store_message(
             db,
             organization_id=attempt.organization_id,
             analyzer_id=analyzer.id,
@@ -185,33 +285,61 @@ def process_order_attempt(
             direction="inbound",
             body=inbound,
             correlation_id=attempt.correlation_id,
+            content_type=(
+                "application/hl7-v2; profile=LAW"
+                if use_mllp or inbound.startswith("MSH|")
+                else "text/plain"
+            ),
         )
-        attempt.response_message_id = response_message.id
-    elif success:
-        # Transport accepted the write; Phase 3 will require a real protocol ACK.
-        ack_body = "TCP_TRANSPORT_OK\nnote=application ACK pending HL7 Phase 3\n"
-        response_message = store_message(
-            db,
-            organization_id=attempt.organization_id,
-            analyzer_id=analyzer.id,
-            worklist_item_id=worklist_item.id,
-            attempt_id=attempt.id,
-            direction="inbound",
-            body=ack_body,
-            correlation_id=attempt.correlation_id,
-            content_type="text/plain; laboraiq-transport=v0",
-        )
-        attempt.response_message_id = response_message.id
+        if attempt.response_message_id is None:
+            attempt.response_message_id = stored.id
+        if use_mllp or inbound.startswith("MSH|"):
+            if is_result_message(inbound):
+                result_message = inbound
+            elif ack_message is None:
+                ack_message = inbound
 
     attempt.finished_at = datetime.now(UTC)
-    if success:
+    success = False
+    if not transport_ok:
+        attempt.state = "failed"
+        attempt.error = detail
+    elif use_mllp:
+        if ack_message is None:
+            attempt.state = "failed"
+            attempt.error = "HL7 ACK missing from analyzer response"
+        else:
+            ack = parse_ack(ack_message)
+            if ack.ok:
+                success = True
+                attempt.state = "acknowledged"
+                attempt.error = None
+                worklist_item.status = "result_received" if result_message else "awaiting_result"
+            else:
+                attempt.state = "failed"
+                attempt.error = f"HL7 NAK {ack.code}: {ack.text}"[:500]
+    else:
+        # Stub protocol: transport write success is enough (Phase 2 behaviour).
+        success = True
         attempt.state = "acknowledged"
         attempt.error = None
         worklist_item.status = "completed"
-        event_type = "analyzer.order_acknowledged"
-    else:
-        attempt.state = "failed"
-        attempt.error = detail
+        if not inbound_messages:
+            ack_body = "TCP_TRANSPORT_OK\nnote=stub protocol has no application ACK\n"
+            response_message = store_message(
+                db,
+                organization_id=attempt.organization_id,
+                analyzer_id=analyzer.id,
+                worklist_item_id=worklist_item.id,
+                attempt_id=attempt.id,
+                direction="inbound",
+                body=ack_body,
+                correlation_id=attempt.correlation_id,
+                content_type="text/plain; laboraiq-transport=v0",
+            )
+            attempt.response_message_id = response_message.id
+
+    if not success:
         retries_used = attempt.attempt_no
         max_attempts = analyzer.retry_limit + 1
         if retries_used < max_attempts:
@@ -226,8 +354,12 @@ def process_order_attempt(
         else:
             worklist_item.status = "failed"
             event_type = "analyzer.order_failed"
-    worklist_item.updated_by = context.user_id
+    else:
+        event_type = (
+            "analyzer.order_result_received" if result_message else "analyzer.order_acknowledged"
+        )
 
+    worklist_item.updated_by = context.user_id
     record_event(
         db,
         request,
@@ -243,6 +375,7 @@ def process_order_attempt(
             "worklist_status": worklist_item.status,
             "error": attempt.error,
             "payload_hash": attempt.payload_hash,
+            "result_received": bool(result_message),
         },
     )
     return attempt
