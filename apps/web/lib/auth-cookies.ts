@@ -41,6 +41,21 @@ export function clearSessionCookies(response: NextResponse): NextResponse {
   return response;
 }
 
+/**
+ * Absolute API base for Next.js route handlers (Node fetch rejects relative URLs).
+ * Prefer INTERNAL_API_URL on EC2/UAT where the browser uses a relative NEXT_PUBLIC_API_URL.
+ */
 export function apiBaseUrl(): string {
-  return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+  const configured =
+    process.env.INTERNAL_API_URL?.trim() ||
+    process.env.NEXT_PUBLIC_API_URL?.trim() ||
+    "http://127.0.0.1:8000/api/v1";
+  if (configured.startsWith("/")) {
+    const origin = (process.env.INTERNAL_API_ORIGIN?.trim() || "http://127.0.0.1:8000").replace(
+      /\/$/,
+      ""
+    );
+    return `${origin}${configured}`;
+  }
+  return configured.replace(/\/$/, "");
 }

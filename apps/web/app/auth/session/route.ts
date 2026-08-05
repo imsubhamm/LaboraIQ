@@ -32,13 +32,22 @@ export async function POST(request: NextRequest) {
 
   // Exchange the validated admin identity for a signed LaboraIQ API session JWT.
   // Requires API DEV_AUTH_ENABLED (local/UAT). Production should use OIDC instead.
-  const apiResponse = await fetch(`${apiBaseUrl()}/auth/session`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Dev-User-Email": email
-    }
-  });
+  let apiResponse: Response;
+  try {
+    apiResponse = await fetch(`${apiBaseUrl()}/auth/session`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Dev-User-Email": email
+      }
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "API unreachable";
+    return NextResponse.json(
+      { detail: `Unable to establish an API session (${reason})` },
+      { status: 503 }
+    );
+  }
   const session = (await apiResponse.json().catch(() => ({}))) as SessionResponse;
   if (!apiResponse.ok || !session.access_token) {
     const detail =
