@@ -4,7 +4,7 @@ resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = { Name = "${local.name}-vpc" }
+  tags                 = { Name = "${local.name}-vpc" }
 }
 
 resource "aws_subnet" "private" {
@@ -12,7 +12,7 @@ resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = var.private_subnet_cidrs[count.index]
   availability_zone = var.availability_zones[count.index]
-  tags = { Name = "${local.name}-private-${count.index + 1}" }
+  tags              = { Name = "${local.name}-private-${count.index + 1}" }
 }
 
 resource "aws_security_group" "database" {
@@ -52,7 +52,7 @@ resource "aws_kms_key" "platform" {
   description             = "${local.name} platform data key"
   deletion_window_in_days = 30
   enable_key_rotation     = true
-  policy = data.aws_iam_policy_document.kms.json
+  policy                  = data.aws_iam_policy_document.kms.json
 }
 resource "aws_kms_alias" "platform" {
   name          = "alias/${local.name}"
@@ -62,8 +62,8 @@ resource "aws_kms_alias" "platform" {
 data "aws_caller_identity" "current" {}
 data "aws_iam_policy_document" "kms" {
   statement {
-    sid = "AccountAdministration"
-    actions = ["kms:*"]
+    sid       = "AccountAdministration"
+    actions   = ["kms:*"]
     resources = ["*"]
     principals {
       type        = "AWS"
@@ -77,33 +77,33 @@ resource "aws_db_subnet_group" "main" {
   subnet_ids = aws_subnet.private[*].id
 }
 resource "aws_db_instance" "postgres" {
-  identifier                    = "${local.name}-postgres"
-  engine                        = "postgres"
-  engine_version                = "16"
-  instance_class                = var.db_instance_class
-  allocated_storage             = var.db_allocated_storage
-  max_allocated_storage         = var.db_max_allocated_storage
-  storage_type                  = "gp3"
-  storage_encrypted             = true
-  kms_key_id                    = aws_kms_key.platform.arn
-  db_name                       = "laboraiq"
-  username                      = "laboraiq_admin"
-  manage_master_user_password   = true
-  db_subnet_group_name          = aws_db_subnet_group.main.name
-  vpc_security_group_ids        = [aws_security_group.database.id]
-  backup_retention_period       = var.db_backup_retention_days
-  copy_tags_to_snapshot         = true
-  deletion_protection           = var.deletion_protection
-  skip_final_snapshot           = var.environment != "production"
-  final_snapshot_identifier     = var.environment == "production" ? "${local.name}-final" : null
+  identifier                      = "${local.name}-postgres"
+  engine                          = "postgres"
+  engine_version                  = "16"
+  instance_class                  = var.db_instance_class
+  allocated_storage               = var.db_allocated_storage
+  max_allocated_storage           = var.db_max_allocated_storage
+  storage_type                    = "gp3"
+  storage_encrypted               = true
+  kms_key_id                      = aws_kms_key.platform.arn
+  db_name                         = "laboraiq"
+  username                        = "laboraiq_admin"
+  manage_master_user_password     = true
+  db_subnet_group_name            = aws_db_subnet_group.main.name
+  vpc_security_group_ids          = [aws_security_group.database.id]
+  backup_retention_period         = var.db_backup_retention_days
+  copy_tags_to_snapshot           = true
+  deletion_protection             = var.deletion_protection
+  skip_final_snapshot             = var.environment != "production"
+  final_snapshot_identifier       = var.environment == "production" ? "${local.name}-final" : null
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
-  performance_insights_enabled  = true
+  performance_insights_enabled    = true
   performance_insights_kms_key_id = aws_kms_key.platform.arn
 }
 
 resource "aws_secretsmanager_secret" "application" {
-  name       = "${local.name}/application"
-  kms_key_id = aws_kms_key.platform.arn
+  name        = "${local.name}/application"
+  kms_key_id  = aws_kms_key.platform.arn
   description = "Runtime application configuration; values populated outside Terraform."
 }
 
@@ -136,14 +136,14 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "raw_messages" {
   }
 }
 resource "aws_s3_bucket_public_access_block" "evidence" {
-  bucket = aws_s3_bucket.evidence.id
+  bucket                  = aws_s3_bucket.evidence.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
 resource "aws_s3_bucket_public_access_block" "raw_messages" {
-  bucket = aws_s3_bucket.raw_messages.id
+  bucket                  = aws_s3_bucket.raw_messages.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -159,7 +159,7 @@ resource "aws_sqs_queue" "integration" {
   name                       = "${local.name}-integration"
   kms_master_key_id          = aws_kms_key.platform.arn
   visibility_timeout_seconds = 120
-  redrive_policy = jsonencode({ deadLetterTargetArn = aws_sqs_queue.dead_letter.arn, maxReceiveCount = 5 })
+  redrive_policy             = jsonencode({ deadLetterTargetArn = aws_sqs_queue.dead_letter.arn, maxReceiveCount = 5 })
 }
 
 resource "aws_cloudwatch_log_group" "api" {

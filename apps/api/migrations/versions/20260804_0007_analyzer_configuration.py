@@ -25,9 +25,7 @@ def upgrade() -> None:
         sa.Column("protocol", sa.String(30), nullable=False),
         sa.Column("host", sa.String(255), nullable=False),
         sa.Column("port", sa.Integer(), nullable=False),
-        sa.Column(
-            "connection_mode", sa.String(20), nullable=False, server_default="bidirectional"
-        ),
+        sa.Column("connection_mode", sa.String(20), nullable=False, server_default="bidirectional"),
         sa.Column(
             "status",
             sa.Enum("active", "inactive", name="analyzer_status"),
