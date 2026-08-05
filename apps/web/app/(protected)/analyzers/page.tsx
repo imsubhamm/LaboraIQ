@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { Activity, AlertCircle, Cable, Cpu, Network, Plus, Search, X } from "lucide-react";
+import { Activity, AlertCircle, Cable, Cpu, Network, Plus, Search, Trash2, X } from "lucide-react";
 import { api, Page } from "@/lib/api";
 import { can } from "@/lib/auth";
 
@@ -10,7 +10,7 @@ type Branch = { id:string; code:string; name:string };
 type TestParameter = { id:string; name:string; external_code:string };
 type LisTest = { id:string; code:string; name:string; parameters:TestParameter[] };
 type ParameterMapping = { id:string; parameter_id:string; parameter_name:string; lis_parameter_code:string; machine_parameter_code:string; unit:string|null };
-type TestMapping = { id:string; test_id:string; lis_test_code:string; test_name:string; machine_test_code:string; parameters:ParameterMapping[] };
+type TestMapping = { id:string; test_id:string; lis_test_code:string; test_name:string; machine_test_code:string; status:string; parameters:ParameterMapping[] };
 type ConnectionEvent = { id:string; event_type:string; attempt:number; success:boolean; latency_ms:number|null; message:string; correlation_id:string; occurred_at:string };
 type ConnectionResult = { connection_status:string; attempts:number; success:boolean; latency_ms:number|null; message:string; tested_at:string };
 
@@ -97,6 +97,31 @@ export default function AnalyzersPage() {
     finally{setSaving(false);}
   }
 
+  async function removeMapping(mapping:TestMapping){
+    if(!mappingAnalyzer)return;
+    if(!window.confirm(`Delete mapping ${mapping.lis_test_code} → ${mapping.machine_test_code}?`))return;
+    try {
+      setSaving(true); setError("");
+      await api(`/analyzers/${mappingAnalyzer.id}/mappings/${mapping.id}`,{method:"DELETE"});
+      if(selectedTestId===mapping.test_id)setSelectedTestId("");
+      setMappings(await api<TestMapping[]>(`/analyzers/${mappingAnalyzer.id}/mappings`));
+    } catch(reason){setError(reason instanceof Error?reason.message:"Unable to delete mapping");}
+    finally{setSaving(false);}
+  }
+
+  async function deactivateMapping(mapping:TestMapping){
+    if(!mappingAnalyzer)return;
+    try {
+      setSaving(true); setError("");
+      await api(`/analyzers/${mappingAnalyzer.id}/mappings/${mapping.id}`,{
+        method:"PATCH",
+        body:JSON.stringify({status: mapping.status==="active"?"inactive":"active"}),
+      });
+      setMappings(await api<TestMapping[]>(`/analyzers/${mappingAnalyzer.id}/mappings`));
+    } catch(reason){setError(reason instanceof Error?reason.message:"Unable to update mapping status");}
+    finally{setSaving(false);}
+  }
+
   async function openConnection(analyzer:Analyzer){
     try {
       setError(""); setConnectionAnalyzer(analyzer); setConnectionResult(null);
@@ -137,7 +162,7 @@ export default function AnalyzersPage() {
       <p className="configuration-note">Use the static IP, port, and protocol from the analyzer interface manual.</p><div className="form-actions"><button type="button" onClick={()=>setOpen(false)}>Cancel</button><button className="primary" disabled={saving}>{saving?"Saving…":"Save analyzer"}</button></div>
     </form></section></div>}
     {mappingAnalyzer&&<div className="modal-backdrop"><section className="modal mapping-modal"><div className="modal-head"><div><p className="eyebrow">TEST-CODE MAPPING</p><h2>{mappingAnalyzer.vendor} {mappingAnalyzer.model}</h2><small>{mappingAnalyzer.code} · {mappings.length} mapped test(s)</small></div><button aria-label="Close mappings" onClick={()=>setMappingAnalyzer(null)}><X/></button></div>
-      <div className="mapping-layout"><aside><h3>Mapped tests</h3>{mappings.length===0?<p>No tests mapped yet.</p>:mappings.map(mapping=><button key={mapping.id} className={selectedTestId===mapping.test_id?"active":""} onClick={()=>setSelectedTestId(mapping.test_id)}><strong>{mapping.lis_test_code} → {mapping.machine_test_code}</strong><span>{mapping.test_name} · {mapping.parameters.length} parameters</span></button>)}</aside>
+      <div className="mapping-layout"><aside><h3>Mapped tests</h3>{mappings.length===0?<p>No tests mapped yet.</p>:mappings.map(mapping=><div key={mapping.id} className="mapping-chip-row"><button className={selectedTestId===mapping.test_id?"active":""} onClick={()=>setSelectedTestId(mapping.test_id)}><strong>{mapping.lis_test_code} → {mapping.machine_test_code}</strong><span>{mapping.test_name} · {mapping.parameters.length} parameters · {mapping.status}</span></button>{can("analyzer.manage")&&<div className="mapping-chip-actions"><button type="button" onClick={()=>void deactivateMapping(mapping)} disabled={saving}>{mapping.status==="active"?"Deactivate":"Activate"}</button><button type="button" aria-label={`Delete ${mapping.lis_test_code}`} onClick={()=>void removeMapping(mapping)} disabled={saving}><Trash2 size={14}/></button></div>}</div>)}</aside>
       <form key={selectedTestId} onSubmit={submitMapping}><label>Search LIS tests<div className="mapping-test-search"><Search size={16}/><input aria-label="Search LIS tests" placeholder="Type test code or name, e.g. BIO0231" value={testSearch} onChange={event=>{setTestSearch(event.target.value);setSelectedTestId("")}}/></div><small>{searchingTests?"Searching catalogue…":`${tests.length} result(s) shown`}</small></label><label>LIS test *<select required value={selectedTestId} onChange={event=>setSelectedTestId(event.target.value)} disabled={searchingTests}><option value="" disabled>{searchingTests?"Searching…":"Select test"}</option>{tests.map(test=><option key={test.id} value={test.id}>{test.code} · {test.name}</option>)}</select></label>{selectedTest&&<><label>Machine test code *<input name="machine_test_code" required maxLength={100} defaultValue={existingMapping?.machine_test_code??""} placeholder="CBC"/></label><div className="parameter-map-head"><strong>Parameter mapping</strong><span>LIS parameter → Machine identifier → Unit</span></div>{selectedTest.parameters.length===0?<p className="configuration-note">This LIS test has no parameters configured in Test master.</p>:<div className="parameter-map-list">{selectedTest.parameters.map(parameter=><div key={parameter.id}><label><span>{parameter.name}<small>{parameter.external_code}</small></span><input name={`machine_${parameter.id}`} required maxLength={100} defaultValue={parameterDefault(parameter.id,"machine_parameter_code")} placeholder={parameter.external_code}/></label><input aria-label={`${parameter.name} unit`} name={`unit_${parameter.id}`} maxLength={40} defaultValue={parameterDefault(parameter.id,"unit")} placeholder="Unit, e.g. g/dL"/></div>)}</div>}<div className="form-actions"><button type="button" onClick={()=>setMappingAnalyzer(null)}>Close</button><button className="primary" disabled={saving}>{saving?"Saving…":existingMapping?"Update mapping":"Save mapping"}</button></div></>}</form></div>
     </section></div>}
     {connectionAnalyzer&&<div className="modal-backdrop"><section className="modal connection-modal"><div className="modal-head"><div><p className="eyebrow">CONNECTION MONITOR</p><h2>{connectionAnalyzer.vendor} {connectionAnalyzer.model}</h2><small>{connectionAnalyzer.host}:{connectionAnalyzer.port} · {protocolLabels[connectionAnalyzer.protocol]}</small></div><button aria-label="Close connection monitor" onClick={()=>setConnectionAnalyzer(null)}><X/></button></div><div className="connection-summary"><article><span className={`connection-status ${connectionAnalyzer.connection_status}`}>{connectionAnalyzer.connection_status.replaceAll("_"," ")}</span><small>Current state</small></article><article><strong>{connectionAnalyzer.connection_timeout_seconds}s</strong><small>Timeout · {connectionAnalyzer.retry_limit} retries</small></article><article><strong>{connectionAnalyzer.heartbeat_interval_seconds}s</strong><small>Heartbeat interval</small></article></div>{connectionAnalyzer.last_connection_error&&<div className="connection-error"><AlertCircle size={16}/><span><strong>Last error</strong>{connectionAnalyzer.last_connection_error}</span></div>}{connectionResult&&<div className={`probe-result ${connectionResult.success?"success":"failed"}`}><Activity size={16}/><span><strong>{connectionResult.message}</strong><small>{connectionResult.attempts} attempt(s) · {connectionResult.latency_ms??"—"} ms</small></span></div>}<div className="connection-controls"><button onClick={()=>void runConnectionProbe("heartbeat")} disabled={testingConnection}>Run heartbeat</button><button className="primary" onClick={()=>void runConnectionProbe("connection-test")} disabled={testingConnection}>{testingConnection?"Testing…":"Test connection"}</button></div><div className="connection-history"><h3>Connection events</h3>{connectionEvents.length===0?<p>No connection attempts recorded.</p>:<div className="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Attempt</th><th>Latency</th><th>Outcome</th><th>Message</th></tr></thead><tbody>{connectionEvents.map(event=><tr key={event.id}><td>{new Date(event.occurred_at).toLocaleString()}</td><td>{event.event_type.replaceAll("_"," ")}</td><td>{event.attempt}</td><td>{event.latency_ms??"—"} ms</td><td><span className={`connection-status ${event.success?"connected":"error"}`}>{event.success?"success":"failed"}</span></td><td>{event.message}</td></tr>)}</tbody></table></div>}</div></section></div>}

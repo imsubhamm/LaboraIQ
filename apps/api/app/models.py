@@ -106,9 +106,7 @@ class Analyzer(Base, TimestampMixin):
 
 class AnalyzerConnectionEvent(Base):
     __tablename__ = "analyzer_connection_events"
-    __table_args__ = (
-        Index("ix_analyzer_connection_events_recent", "analyzer_id", "occurred_at"),
-    )
+    __table_args__ = (Index("ix_analyzer_connection_events_recent", "analyzer_id", "occurred_at"),)
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
@@ -128,9 +126,7 @@ class AnalyzerTestMapping(Base, TimestampMixin):
     __tablename__ = "analyzer_test_mappings"
     __table_args__ = (
         UniqueConstraint("analyzer_id", "test_id", name="uq_analyzer_test_mapping"),
-        UniqueConstraint(
-            "analyzer_id", "machine_test_code", name="uq_analyzer_machine_test_code"
-        ),
+        UniqueConstraint("analyzer_id", "machine_test_code", name="uq_analyzer_machine_test_code"),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
@@ -316,7 +312,40 @@ class TestCatalogParameter(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200))
     external_code: Mapped[str] = mapped_column(String(255))
     display_order: Mapped[int] = mapped_column(Integer, default=0)
+    unit: Mapped[str | None] = mapped_column(String(40))
+    reference_low: Mapped[str | None] = mapped_column(String(40))
+    reference_high: Mapped[str | None] = mapped_column(String(40))
+    reference_text: Mapped[str | None] = mapped_column(String(200))
     test: Mapped[TestCatalogItem] = relationship(back_populates="parameters")
+
+
+class AnalyzerWorklistItem(Base, TimestampMixin):
+    __tablename__ = "analyzer_worklist_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "specimen_id",
+            "analyzer_id",
+            "test_id",
+            name="uq_worklist_specimen_analyzer_test",
+        ),
+        Index("ix_worklist_status_created", "organization_id", "status", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    specimen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("specimens.id"), index=True)
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lab_orders.id"), index=True)
+    test_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("test_catalog_items.id"), index=True)
+    analyzer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analyzers.id"), index=True)
+    mapping_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analyzer_test_mappings.id"), index=True
+    )
+    machine_test_code: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    correlation_id: Mapped[str] = mapped_column(String(100), index=True)
+    cancelled_reason: Mapped[str | None] = mapped_column(String(200))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
 class LabOrder(Base, TimestampMixin):
