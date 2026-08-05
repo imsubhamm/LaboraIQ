@@ -3,7 +3,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: { default: "LaboraIQ Control Centre", template: "%s · LaboraIQ" },
-  description: "Secure laboratory operations foundation and configuration control."
+  description: "Secure laboratory operations foundation and configuration control.",
+  applicationName: "LaboraIQ",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
