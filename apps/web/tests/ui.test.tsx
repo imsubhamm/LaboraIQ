@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { can } from "@/lib/auth";
+import { apiBaseUrl } from "@/lib/auth-cookies";
 import { isSessionValid } from "@/proxy";
 import { ResourcePage } from "@/components/resource-page";
 import { SpecimenBarcode } from "@/components/specimen-barcode";
@@ -9,6 +10,25 @@ vi.mock("next/navigation", () => ({ usePathname: () => "/organizations" }));
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return { ...actual, api: vi.fn().mockResolvedValue({items: [], total: 0, limit: 25, offset: 0}) };
+});
+
+describe("apiBaseUrl for server route handlers", () => {
+  afterEach(() => {
+    delete process.env.INTERNAL_API_URL;
+    delete process.env.INTERNAL_API_ORIGIN;
+    delete process.env.NEXT_PUBLIC_API_URL;
+  });
+
+  it("resolves relative NEXT_PUBLIC_API_URL against the internal origin", () => {
+    process.env.NEXT_PUBLIC_API_URL = "/api/v1";
+    expect(apiBaseUrl()).toBe("http://127.0.0.1:8000/api/v1");
+  });
+
+  it("prefers INTERNAL_API_URL when set", () => {
+    process.env.NEXT_PUBLIC_API_URL = "/api/v1";
+    process.env.INTERNAL_API_URL = "http://127.0.0.1:8000/api/v1";
+    expect(apiBaseUrl()).toBe("http://127.0.0.1:8000/api/v1");
+  });
 });
 
 describe("platform administration UI", () => {
