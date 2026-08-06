@@ -206,8 +206,14 @@ def test_test_master_import_groups_panel_parameters_and_flags_placeholder_specim
             "Service Code",
             "Service Name",
             "SPECIMEN",
+            "CONTAINER TYPE",
+            "PRICE",
             "PARAMETER CODE",
             "PARAMETER DESCRIPTION",
+            "UNIT",
+            "REFERENCE LOW",
+            "REFERENCE HIGH",
+            "REFERENCE SOURCE",
         ]
     )
     sheet.append(
@@ -218,8 +224,14 @@ def test_test_master_import_groups_panel_parameters_and_flags_placeholder_specim
             "BIO0077",
             "LIPID PROFILE",
             "Serum",
+            "SST clot activator",
+            "1200",
             "HDL",
             "hdl_external",
+            "mg/dL",
+            "40",
+            "60",
+            "Lab method sheet 2026-01",
         ]
     )
     sheet.append(
@@ -230,14 +242,52 @@ def test_test_master_import_groups_panel_parameters_and_flags_placeholder_specim
             "BIO0077",
             "LIPID PROFILE",
             "Serum",
+            "SST clot activator",
+            "1200",
             "LDL",
             "ldl_external",
+            "mg/dL",
+            "0",
+            "100",
+            "Lab method sheet 2026-01",
         ]
     )
     sheet.append(
-        ["Pathology", "Laboratory", "Microbiology", "MIC001", "CULTURE", "specimen", "", ""]
+        [
+            "Pathology",
+            "Laboratory",
+            "Microbiology",
+            "MIC001",
+            "CULTURE",
+            "specimen",
+            "Unspecified",
+            "0",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
     )
-    sheet.append(["Pathology", "Laboratory", "Biochemistry", "", "MISSING CODE", "Serum", "", ""])
+    sheet.append(
+        [
+            "Pathology",
+            "Laboratory",
+            "Biochemistry",
+            "",
+            "MISSING CODE",
+            "Serum",
+            "SST",
+            "100",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
+    )
     content = BytesIO()
     workbook.save(content)
 
@@ -262,10 +312,91 @@ def test_test_master_import_groups_panel_parameters_and_flags_placeholder_specim
     assert listing.status_code == 200
     item = listing.json()["items"][0]
     assert item["is_panel"] is True
+    assert item["price"] == "1200.00"
+    assert item["container_type"] == "SST clot activator"
     assert [parameter["name"] for parameter in item["parameters"]] == ["HDL", "LDL"]
+    assert item["parameters"][0]["reference_low"] == "40"
+    assert item["parameters"][0]["reference_source"] == "Lab method sheet 2026-01"
     review = client.get("/api/v1/test-master", params={"review_only": "true"}).json()
     assert review["total"] == 1
     assert review["items"][0]["code"] == "MIC001"
+
+
+def test_test_master_item_can_update_price_and_specimen_meta(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="specimen",
+        container_type="Unspecified",
+        price="0.00",
+        validation_status="needs_review",
+    )
+    db.add(test)
+    db.commit()
+    updated = client.patch(
+        f"/api/v1/test-master/{test.id}",
+        json={
+            "specimen_type": "Serum",
+            "container_type": "SST clot activator",
+            "price": "900.00",
+        },
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["specimen_type"] == "Serum"
+    assert body["container_type"] == "SST clot activator"
+    assert body["price"] == "900.00"
+    assert body["validation_status"] == "validated"
+
+
+def test_test_parameter_can_be_created_and_updated(
+    client: TestClient, db: Session, context: AuthContext
+) -> None:
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add(test)
+    db.commit()
+    created = client.post(
+        f"/api/v1/test-master/{test.id}/parameters",
+        json={
+            "name": "Androstenedione",
+            "external_code": "andro",
+            "display_order": 1,
+            "unit": "ng/mL",
+            "reference_text": "Reference range pending clinical approval",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["external_code"] == "ANDRO"
+    assert created.json()["unit"] == "ng/mL"
+    parameter_id = created.json()["id"]
+    updated = client.patch(
+        f"/api/v1/test-master/{test.id}/parameters/{parameter_id}",
+        json={
+            "reference_low": "0.3",
+            "reference_high": "3.5",
+            "critical_low": "0.1",
+            "critical_high": "5.0",
+            "reference_source": "UAT provisional limits — lab confirmation required",
+            "reference_text": "Adult reference interval (provisional UAT)",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["reference_low"] == "0.3"
+    assert updated.json()["reference_high"] == "3.5"
+    assert updated.json()["critical_low"] == "0.1"
+    assert updated.json()["reference_source"].startswith("UAT provisional")
+    listing = client.get("/api/v1/test-master", params={"search": "BIO0231"}).json()
+    assert listing["items"][0]["validation_status"] == "validated"
 
 
 def test_environment_origin_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -623,42 +754,6 @@ def test_analyzer_mapping_can_be_deactivated_and_deleted(
     listing = client.get(f"/api/v1/analyzers/{analyzer['id']}/mappings")
     assert listing.status_code == 200
     assert listing.json() == []
-
-
-def test_test_parameter_can_be_created_and_updated(
-    client: TestClient, db: Session, context: AuthContext
-) -> None:
-    test = TestCatalogItem(
-        organization_id=context.organization_id,
-        code="BIO0231",
-        name="Androstenedione Test",
-        specimen_type="Serum",
-        container_type="SST",
-        price="900.00",
-    )
-    db.add(test)
-    db.commit()
-    created = client.post(
-        f"/api/v1/test-master/{test.id}/parameters",
-        json={
-            "name": "Androstenedione",
-            "external_code": "andro",
-            "display_order": 1,
-            "unit": "ng/mL",
-            "reference_text": "Reference range pending clinical approval",
-        },
-    )
-    assert created.status_code == 201
-    assert created.json()["external_code"] == "ANDRO"
-    assert created.json()["unit"] == "ng/mL"
-    parameter_id = created.json()["id"]
-    updated = client.patch(
-        f"/api/v1/test-master/{test.id}/parameters/{parameter_id}",
-        json={"reference_low": "0.3", "reference_high": "3.5"},
-    )
-    assert updated.status_code == 200
-    assert updated.json()["reference_low"] == "0.3"
-    assert updated.json()["reference_high"] == "3.5"
 
 
 def test_accepting_specimen_creates_analyzer_worklist_item(

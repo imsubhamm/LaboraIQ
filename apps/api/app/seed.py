@@ -10,6 +10,7 @@ from app.models import (
     Permission,
     Role,
     TestCatalogItem,
+    TestCatalogParameter,
     User,
     UserRoleAssignment,
 )
@@ -150,6 +151,13 @@ def seed() -> None:
             ("HBA1C", "HbA1c", "Whole blood", "EDTA lavender tube", "650.00"),
             ("VITD", "Vitamin D", "Serum", "Clot activator red tube", "1400.00"),
             ("URINE", "Urine Routine", "Urine", "Sterile urine container", "300.00"),
+            (
+                "BIO0231",
+                "A4 - Androstenedione Test",
+                "Serum",
+                "SST clot activator",
+                "900.00",
+            ),
         ]
         for test_code, test_name, specimen, container, price in test_catalog:
             existing_test = db.scalar(
@@ -159,16 +167,57 @@ def seed() -> None:
                 )
             )
             if not existing_test:
-                db.add(
-                    TestCatalogItem(
-                        organization_id=organization.id,
-                        code=test_code,
-                        name=test_name,
-                        specimen_type=specimen,
-                        container_type=container,
-                        price=price,
-                    )
+                existing_test = TestCatalogItem(
+                    organization_id=organization.id,
+                    code=test_code,
+                    name=test_name,
+                    specimen_type=specimen,
+                    container_type=container,
+                    price=price,
+                    validation_status="validated",
                 )
+                db.add(existing_test)
+                db.flush()
+            if test_code == "BIO0231":
+                existing_test.specimen_type = specimen
+                existing_test.container_type = container
+                existing_test.price = price
+                existing_test.is_panel = True
+                andro = next(
+                    (
+                        parameter
+                        for parameter in existing_test.parameters
+                        if parameter.external_code.upper() == "ANDRO"
+                    ),
+                    None,
+                )
+                if andro is None:
+                    existing_test.parameters.append(
+                        TestCatalogParameter(
+                            name="Androstenedione",
+                            external_code="ANDRO",
+                            display_order=1,
+                            unit="ng/mL",
+                            reference_low="0.3",
+                            reference_high="3.5",
+                            reference_text="Adult reference interval (provisional UAT)",
+                            reference_source=(
+                                "UAT provisional limits — confirm with laboratory "
+                                "before clinical use"
+                            ),
+                        )
+                    )
+                else:
+                    andro.unit = andro.unit or "ng/mL"
+                    andro.reference_low = andro.reference_low or "0.3"
+                    andro.reference_high = andro.reference_high or "3.5"
+                    andro.reference_text = (
+                        andro.reference_text or "Adult reference interval (provisional UAT)"
+                    )
+                    andro.reference_source = andro.reference_source or (
+                        "UAT provisional limits — confirm with laboratory before clinical use"
+                    )
+                existing_test.validation_status = "validated"
 
         user = db.scalar(select(User).where(User.email == "admin@dev.labora.local"))
         if not user:
