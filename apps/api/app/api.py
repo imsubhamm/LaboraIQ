@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.analyzer_orders import create_queued_attempt, process_queued_orders
 from app.audit import record_event
 from app.auth import Auth, AuthContext, load_context_for_identity, require_permission
+from app.catalogue import recompute_validation_status
 from app.config import get_settings
 from app.database import get_db
 from app.models import (
@@ -117,6 +118,7 @@ from app.schemas import (
     TestMasterCreate,
     TestMasterImportRead,
     TestMasterRead,
+    TestMasterUpdate,
     TestParameterCreate,
     TestParameterRead,
     TestParameterUpdate,
@@ -1309,10 +1311,8 @@ def create_test_master_item(
         **payload.model_dump(),
         organization_id=context.organization_id,
         is_panel=False,
-        validation_status=(
-            "needs_review" if payload.specimen_type.strip().lower() == "specimen" else "validated"
-        ),
     )
+    recompute_validation_status(item)
     db.add(item)
     flush(db)
     record_event(
@@ -1324,6 +1324,49 @@ def create_test_master_item(
         entity_id=item.id,
         action="create",
         new=payload.model_dump(mode="json"),
+    )
+    commit(db)
+    return item
+
+
+@router.patch("/test-master/{test_id}", response_model=TestMasterRead)
+def update_test_master_item(
+    test_id: uuid.UUID,
+    payload: TestMasterUpdate,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("test_master.manage"))],
+) -> TestCatalogItem:
+    item = get_tenant_record(db, TestCatalogItem, test_id, context)
+    previous = {
+        "name": item.name,
+        "service_type": item.service_type,
+        "department": item.department,
+        "sub_department": item.sub_department,
+        "specimen_type": item.specimen_type,
+        "container_type": item.container_type,
+        "price": str(item.price),
+        "validation_status": item.validation_status,
+    }
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(item, key, value)
+    recompute_validation_status(item)
+    record_event(
+        db,
+        request,
+        context,
+        event_type="test_master.updated",
+        entity_type="test_master",
+        entity_id=item.id,
+        action="update",
+        previous=previous,
+        new={
+            **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in data.items()},
+            "validation_status": item.validation_status,
+        },
     )
     commit(db)
     return item
@@ -1351,14 +1394,13 @@ def create_test_parameter(
         reference_low=payload.reference_low.strip() if payload.reference_low else None,
         reference_high=payload.reference_high.strip() if payload.reference_high else None,
         reference_text=payload.reference_text.strip() if payload.reference_text else None,
+        critical_low=payload.critical_low.strip() if payload.critical_low else None,
+        critical_high=payload.critical_high.strip() if payload.critical_high else None,
+        reference_source=(payload.reference_source.strip() if payload.reference_source else None),
     )
     test.parameters.append(parameter)
     test.is_panel = True
-    has_reference = bool(
-        parameter.reference_low or parameter.reference_high or parameter.reference_text
-    )
-    if not has_reference:
-        test.validation_status = "needs_review"
+    recompute_validation_status(test)
     flush(db)
     record_event(
         db,
@@ -1402,6 +1444,9 @@ def update_test_parameter(
         "reference_low": parameter.reference_low,
         "reference_high": parameter.reference_high,
         "reference_text": parameter.reference_text,
+        "critical_low": parameter.critical_low,
+        "critical_high": parameter.critical_high,
+        "reference_source": parameter.reference_source,
     }
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
@@ -1412,6 +1457,7 @@ def update_test_parameter(
             if value == "":
                 value = None
         setattr(parameter, key, value)
+    recompute_validation_status(test)
     record_event(
         db,
         request,
@@ -1460,14 +1506,38 @@ async def import_test_master(
     if not required.issubset(headers):
         missing = ", ".join(sorted(required.difference(headers)))
         raise HTTPException(status_code=422, detail=f"Missing columns: {missing}")
+    optional = {
+        "CONTAINER",
+        "CONTAINER TYPE",
+        "PRICE",
+        "UNIT",
+        "REFERENCE LOW",
+        "REFERENCE HIGH",
+        "REFERENCE TEXT",
+        "CRITICAL LOW",
+        "CRITICAL HIGH",
+        "REFERENCE SOURCE",
+    }
     positions = {name: headers.index(name) for name in required}
+    for name in optional:
+        if name in headers:
+            positions[name] = headers.index(name)
     grouped: dict[str, dict[str, Any]] = {}
     rejected = 0
     errors: list[str] = []
     row_count = 0
 
     def cell_value(row: tuple[Any, ...], key: str) -> str:
+        if key not in positions:
+            return ""
         return str(row[positions[key]] or "").strip()
+
+    def optional_cell(row: tuple[Any, ...], *keys: str) -> str:
+        for key in keys:
+            value = cell_value(row, key)
+            if value:
+                return value
+        return ""
 
     for row_number, row in enumerate(rows, start=2):
         row_count += 1
@@ -1478,6 +1548,18 @@ async def import_test_master(
             if len(errors) < 20:
                 errors.append(f"Row {row_number}: service code and service name are required")
             continue
+        price_raw = optional_cell(row, "PRICE")
+        price = Decimal("0")
+        if price_raw:
+            try:
+                price = Decimal(price_raw.replace(",", "").replace("₹", "").strip())
+                if price < 0:
+                    raise ValueError("negative")
+            except Exception:
+                rejected += 1
+                if len(errors) < 20:
+                    errors.append(f"Row {row_number}: invalid price '{price_raw}'")
+                continue
         entry = grouped.setdefault(
             code,
             {
@@ -1486,14 +1568,40 @@ async def import_test_master(
                 "department": cell_value(row, "DEPARTMENT") or "Laboratory",
                 "sub_department": cell_value(row, "SUB DEPARTMENT"),
                 "specimen_type": cell_value(row, "SPECIMEN") or "specimen",
+                "container_type": optional_cell(row, "CONTAINER TYPE", "CONTAINER")
+                or "Unspecified",
+                "price": price,
                 "parameters": [],
             },
         )
+        # Prefer non-placeholder / non-zero meta from later rows of the same service.
+        if not entry["name"]:
+            entry["name"] = name
+        specimen = cell_value(row, "SPECIMEN")
+        if specimen and entry["specimen_type"].lower() in {"specimen", "unspecified"}:
+            entry["specimen_type"] = specimen
+        container = optional_cell(row, "CONTAINER TYPE", "CONTAINER")
+        if container and entry["container_type"].lower() == "unspecified":
+            entry["container_type"] = container
+        if price > 0 and Decimal(str(entry["price"])) <= 0:
+            entry["price"] = price
         parameter_name = cell_value(row, "PARAMETER CODE")
         external_code = cell_value(row, "PARAMETER DESCRIPTION")
         if parameter_name or external_code:
             if parameter_name and external_code:
-                entry["parameters"].append((parameter_name, external_code))
+                entry["parameters"].append(
+                    {
+                        "name": parameter_name,
+                        "external_code": external_code,
+                        "unit": optional_cell(row, "UNIT") or None,
+                        "reference_low": optional_cell(row, "REFERENCE LOW") or None,
+                        "reference_high": optional_cell(row, "REFERENCE HIGH") or None,
+                        "reference_text": optional_cell(row, "REFERENCE TEXT") or None,
+                        "critical_low": optional_cell(row, "CRITICAL LOW") or None,
+                        "critical_high": optional_cell(row, "CRITICAL HIGH") or None,
+                        "reference_source": optional_cell(row, "REFERENCE SOURCE") or None,
+                    }
+                )
             else:
                 rejected += 1
                 if len(errors) < 20:
@@ -1508,36 +1616,47 @@ async def import_test_master(
                 TestCatalogItem.code == code,
             )
         )
-        needs_review = entry["specimen_type"].lower() == "specimen"
         if item is None:
-            item = TestCatalogItem(
-                organization_id=context.organization_id,
-                code=code,
-                container_type="Unspecified",
-                price=Decimal("0"),
-            )
+            item = TestCatalogItem(organization_id=context.organization_id, code=code)
             db.add(item)
             created += 1
         else:
             updated += 1
             item.parameters.clear()
-        for key in ("name", "service_type", "department", "sub_department", "specimen_type"):
+        for key in (
+            "name",
+            "service_type",
+            "department",
+            "sub_department",
+            "specimen_type",
+            "container_type",
+            "price",
+        ):
             setattr(item, key, entry[key])
         item.is_panel = bool(entry["parameters"])
-        item.validation_status = "needs_review" if needs_review else "validated"
-        if needs_review:
-            review_required += 1
         seen: set[str] = set()
-        for order, (parameter_name, external_code) in enumerate(entry["parameters"]):
-            if external_code in seen:
+        for order, parameter in enumerate(entry["parameters"]):
+            external = str(parameter["external_code"]).strip().upper()
+            if external in seen:
                 continue
-            seen.add(external_code)
+            seen.add(external)
             item.parameters.append(
                 TestCatalogParameter(
-                    name=parameter_name, external_code=external_code, display_order=order
+                    name=parameter["name"],
+                    external_code=external,
+                    display_order=order,
+                    unit=parameter["unit"],
+                    reference_low=parameter["reference_low"],
+                    reference_high=parameter["reference_high"],
+                    reference_text=parameter["reference_text"],
+                    critical_low=parameter["critical_low"],
+                    critical_high=parameter["critical_high"],
+                    reference_source=parameter["reference_source"],
                 )
             )
             parameter_count += 1
+        if recompute_validation_status(item) == "needs_review":
+            review_required += 1
     summary = TestMasterImportRead(
         rows_received=row_count,
         tests_created=created,

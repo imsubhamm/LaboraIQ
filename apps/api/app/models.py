@@ -316,6 +316,9 @@ class TestCatalogParameter(Base, TimestampMixin):
     reference_low: Mapped[str | None] = mapped_column(String(40))
     reference_high: Mapped[str | None] = mapped_column(String(40))
     reference_text: Mapped[str | None] = mapped_column(String(200))
+    critical_low: Mapped[str | None] = mapped_column(String(40))
+    critical_high: Mapped[str | None] = mapped_column(String(40))
+    reference_source: Mapped[str | None] = mapped_column(String(200))
     test: Mapped[TestCatalogItem] = relationship(back_populates="parameters")
 
 

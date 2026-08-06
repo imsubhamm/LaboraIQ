@@ -326,6 +326,9 @@ class TestParameterRead(APIModel):
     reference_low: str | None = None
     reference_high: str | None = None
     reference_text: str | None = None
+    critical_low: str | None = None
+    critical_high: str | None = None
+    reference_source: str | None = None
 
 
 class TestParameterCreate(APIModel):
@@ -336,6 +339,9 @@ class TestParameterCreate(APIModel):
     reference_low: str | None = Field(default=None, max_length=40)
     reference_high: str | None = Field(default=None, max_length=40)
     reference_text: str | None = Field(default=None, max_length=200)
+    critical_low: str | None = Field(default=None, max_length=40)
+    critical_high: str | None = Field(default=None, max_length=40)
+    reference_source: str | None = Field(default=None, max_length=200)
 
 
 class TestParameterUpdate(APIModel):
@@ -346,6 +352,9 @@ class TestParameterUpdate(APIModel):
     reference_low: str | None = Field(default=None, max_length=40)
     reference_high: str | None = Field(default=None, max_length=40)
     reference_text: str | None = Field(default=None, max_length=200)
+    critical_low: str | None = Field(default=None, max_length=40)
+    critical_high: str | None = Field(default=None, max_length=40)
+    reference_source: str | None = Field(default=None, max_length=200)
 
 
 class AnalyzerWorklistRead(APIModel):
@@ -467,6 +476,16 @@ class TestMasterCreate(APIModel):
     specimen_type: str = Field(min_length=2, max_length=80)
     container_type: str = Field(default="Unspecified", min_length=2, max_length=100)
     price: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class TestMasterUpdate(APIModel):
+    name: str | None = Field(default=None, min_length=2, max_length=200)
+    service_type: str | None = Field(default=None, min_length=2, max_length=80)
+    department: str | None = Field(default=None, min_length=2, max_length=120)
+    sub_department: str | None = Field(default=None, max_length=120)
+    specimen_type: str | None = Field(default=None, min_length=2, max_length=80)
+    container_type: str | None = Field(default=None, min_length=2, max_length=100)
+    price: Decimal | None = Field(default=None, ge=0)
 
 
 class TestMasterRead(TestMasterCreate):

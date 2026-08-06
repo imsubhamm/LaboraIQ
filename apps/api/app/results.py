@@ -42,13 +42,23 @@ def compute_flag(
     reference_low: str | None,
     reference_high: str | None,
     analyzer_flags: str | None,
+    critical_low: str | None = None,
+    critical_high: str | None = None,
 ) -> str | None:
     if analyzer_flags:
         return analyzer_flags.strip().upper()[:20] or None
     number = _parse_number(value)
+    if number is None:
+        return None
+    crit_low = _parse_number(critical_low)
+    crit_high = _parse_number(critical_high)
+    if crit_low is not None and number < crit_low:
+        return "LL"
+    if crit_high is not None and number > crit_high:
+        return "HH"
     low = _parse_number(reference_low)
     high = _parse_number(reference_high)
-    if number is None or (low is None and high is None):
+    if low is None and high is None:
         return None
     if low is not None and number < low:
         return "L"
@@ -166,6 +176,8 @@ def normalize_worklist_result(
         reference_low = catalog.reference_low if catalog else None
         reference_high = catalog.reference_high if catalog else None
         reference_text = catalog.reference_text if catalog else None
+        critical_low = catalog.critical_low if catalog else None
+        critical_high = catalog.critical_high if catalog else None
         value = raw.get("value") or ""
         observation = LabResultObservation(
             result_id=result.id,
@@ -185,6 +197,8 @@ def normalize_worklist_result(
                 value,
                 reference_low=reference_low,
                 reference_high=reference_high,
+                critical_low=critical_low,
+                critical_high=critical_high,
                 analyzer_flags=raw.get("abnormal_flags"),
             ),
             raw_obx=str(raw),
