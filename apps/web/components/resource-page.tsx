@@ -11,13 +11,16 @@ type Field = {
   lookup?: { endpoint: string; labelKeys: string[] };
 };
 
+const DEFAULT_FIELDS: Field[] = [];
+
 export function ResourcePage({
-  title, description, endpoint, columns, fields = [], managePermission, emptyMessage
+  title, description, endpoint, columns, fields = DEFAULT_FIELDS, managePermission, emptyMessage
 }: {
   title: string; description: string; endpoint: string;
   columns: Array<{ key: string; label: string }>;
   fields?: Field[]; managePermission?: Permission; emptyMessage: string;
 }) {
+  const stableFields = fields;
   const [records, setRecords] = useState<ApiRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -30,7 +33,7 @@ export function ResourcePage({
   const load = useCallback(async function load() {
     try {
       setLoading(true);
-      const lookupFields = fields.filter(field => field.lookup);
+      const lookupFields = stableFields.filter(field => field.lookup);
       const [result, ...lookups] = await Promise.all([
         api<Page<ApiRecord>>(`/${endpoint}?limit=25&offset=0`),
         ...lookupFields.map(field => api<Page<ApiRecord>>(`/${field.lookup!.endpoint}?limit=100&offset=0`))
@@ -42,7 +45,7 @@ export function ResourcePage({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load records");
     } finally { setLoading(false); }
-  }, [endpoint, fields]);
+  }, [endpoint, stableFields]);
   useEffect(() => {
     const task = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(task);
@@ -59,7 +62,7 @@ export function ResourcePage({
   }
 
   function displayValue(key: string, value: ApiRecord[string]): string {
-    const field = fields.find(item => item.name === key && item.lookup);
+    const field = stableFields.find(item => item.name === key && item.lookup);
     if (!field?.lookup || value == null) return String(value ?? "—");
     const option = fieldOptions[key]?.find(item => String(item.id) === String(value));
     return option ? field.lookup.labelKeys.map(labelKey => String(option[labelKey] ?? "")).filter(Boolean).join(" · ") : String(value);
@@ -72,7 +75,7 @@ export function ResourcePage({
     <section>
       <div className="page-heading">
         <div><p className="eyebrow">PLATFORM FOUNDATION</p><h1>{title}</h1><p>{description}</p></div>
-        {fields.length > 0 && (!managePermission || can(managePermission)) &&
+        {stableFields.length > 0 && (!managePermission || can(managePermission)) &&
           <button className="primary" onClick={() => setOpen(true)}><Plus size={17}/> Add {title.replace(/s$/, "")}</button>}
       </div>
       <div className="panel">
@@ -90,7 +93,7 @@ export function ResourcePage({
       </div>
       {open && <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="form-title">
         <div className="modal-head"><div><p className="eyebrow">NEW CONFIGURATION</p><h2 id="form-title">Add {title.replace(/s$/, "")}</h2></div><button aria-label="Close form" onClick={() => setOpen(false)}><X/></button></div>
-        <form action={submit}>{formError&&<div className="error-state"><AlertCircle size={18}/>{formError}</div>}{fields.map(field => <label key={field.name}>{field.label}{field.lookup?<select name={field.name} required={field.required} defaultValue=""><option value="" disabled>Select {field.label.toLowerCase()}</option>{(fieldOptions[field.name]??[]).map(option=><option key={String(option.id)} value={String(option.id)}>{field.lookup!.labelKeys.map(key=>String(option[key]??"")).filter(Boolean).join(" · ")}</option>)}</select>:<input name={field.name} type={field.type ?? "text"} required={field.required}/>}</label>)}
+        <form action={submit}>{formError&&<div className="error-state"><AlertCircle size={18}/>{formError}</div>}{stableFields.map(field => <label key={field.name}>{field.label}{field.lookup?<select name={field.name} required={field.required} defaultValue=""><option value="" disabled>Select {field.label.toLowerCase()}</option>{(fieldOptions[field.name]??[]).map(option=><option key={String(option.id)} value={String(option.id)}>{field.lookup!.labelKeys.map(key=>String(option[key]??"")).filter(Boolean).join(" · ")}</option>)}</select>:<input name={field.name} type={field.type ?? "text"} required={field.required}/>}</label>)}
           <div className="form-actions"><button type="button" onClick={() => setOpen(false)}>Cancel</button><button className="primary" type="submit">Save configuration</button></div>
         </form>
       </section></div>}
