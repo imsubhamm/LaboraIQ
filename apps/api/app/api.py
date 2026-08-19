@@ -2776,8 +2776,9 @@ def lis_message_queue_summary(
     filters = [LisIntegrationMessage.organization_id == context.organization_id]
     if not context.is_organization_scoped:
         filters.append(LisIntegrationMessage.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
-    counts = dict(
-        db.execute(
+    count_rows: list[tuple[str, int]] = [
+        (str(state), int(total))
+        for state, total in db.execute(
             select(
                 LisIntegrationMessage.delivery_state,
                 func.count(LisIntegrationMessage.id),
@@ -2785,7 +2786,8 @@ def lis_message_queue_summary(
             .where(*filters)
             .group_by(LisIntegrationMessage.delivery_state)
         ).all()
-    )
+    ]
+    counts: dict[str, int] = {state: total for state, total in count_rows}
     now = datetime.now(UTC)
 
     def age_seconds(value: datetime | None) -> int | None:
