@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 
@@ -159,7 +160,8 @@ def seed() -> None:
                 "900.00",
             ),
         ]
-        for test_code, test_name, specimen, container, price in test_catalog:
+        for test_code, test_name, specimen, container, price_text in test_catalog:
+            price = Decimal(price_text)
             existing_test = db.scalar(
                 select(TestCatalogItem).where(
                     TestCatalogItem.organization_id == organization.id,
