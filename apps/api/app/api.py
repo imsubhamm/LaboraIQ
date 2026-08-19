@@ -22,7 +22,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.analyzer_orders import create_queued_attempt, process_queued_orders
 from app.audit import record_event
@@ -50,6 +50,7 @@ from app.models import (
     Invoice,
     LabOrder,
     LabResult,
+    LabResultObservation,
     LisIntegrationMessage,
     OrderTest,
     Organization,
@@ -2200,6 +2201,31 @@ def specimen_workflow_read(db: Session, specimen: Specimen) -> SpecimenWorkflowR
     )
 
 
+def specimen_workflow_row_read(
+    specimen: Specimen, order: LabOrder | None, patient: Patient | None
+) -> SpecimenWorkflowRead:
+    if order is None or patient is None:
+        raise HTTPException(status_code=404, detail="Specimen order was not found")
+    return SpecimenWorkflowRead(
+        **SpecimenRead.model_validate(specimen).model_dump(),
+        id=specimen.id,
+        order_id=order.id,
+        order_number=order.order_number,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        laboratory_department=specimen.laboratory_department,
+        accession_number=specimen.accession_number,
+        collection_location=specimen.collection_location,
+        container_count=specimen.container_count,
+        collection_notes=specimen.collection_notes,
+        collected_at=specimen.collected_at,
+        received_at=specimen.received_at,
+        reviewed_at=specimen.reviewed_at,
+        rejection_reason=specimen.rejection_reason,
+        rejection_notes=specimen.rejection_notes,
+    )
+
+
 def lis_integration_message_read(message: LisIntegrationMessage) -> LisIntegrationMessageRead:
     return LisIntegrationMessageRead(
         id=message.id,
@@ -2312,7 +2338,7 @@ def list_specimens(
     search: Annotated[str | None, Query(max_length=200)] = None,
 ) -> Page[SpecimenWorkflowRead]:
     statement = (
-        select(Specimen)
+        select(Specimen, LabOrder, Patient)
         .join(LabOrder, LabOrder.id == Specimen.order_id)
         .join(Patient, Patient.id == LabOrder.patient_id)
         .where(Specimen.organization_id == context.organization_id)
@@ -2335,15 +2361,16 @@ def list_specimens(
             )
         )
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
-    records = list(
-        db.scalars(
-            statement.order_by(Specimen.updated_at.desc(), Specimen.id.desc())
-            .limit(limit)
-            .offset(offset)
-        ).all()
-    )
+    records = db.execute(
+        statement.order_by(Specimen.updated_at.desc(), Specimen.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
     return Page[SpecimenWorkflowRead](
-        items=[specimen_workflow_read(db, item) for item in records],
+        items=[
+            specimen_workflow_row_read(specimen, order, patient)
+            for specimen, order, patient in records
+        ],
         total=total,
         limit=limit,
         offset=offset,
@@ -2974,6 +3001,85 @@ def worklist_item_read(db: Session, item: AnalyzerWorklistItem) -> AnalyzerWorkl
     )
 
 
+def worklist_item_reads(
+    db: Session, items: list[AnalyzerWorklistItem]
+) -> list[AnalyzerWorklistRead]:
+    if not items:
+        return []
+    specimen_ids = {item.specimen_id for item in items}
+    order_ids = {item.order_id for item in items}
+    test_ids = {item.test_id for item in items}
+    analyzer_ids = {item.analyzer_id for item in items}
+    item_ids = [item.id for item in items]
+
+    specimens = {
+        row.id: row
+        for row in db.scalars(select(Specimen).where(Specimen.id.in_(specimen_ids))).all()
+    }
+    orders = {
+        row.id: row for row in db.scalars(select(LabOrder).where(LabOrder.id.in_(order_ids))).all()
+    }
+    tests = {
+        row.id: row
+        for row in db.scalars(select(TestCatalogItem).where(TestCatalogItem.id.in_(test_ids))).all()
+    }
+    analyzers = {
+        row.id: row
+        for row in db.scalars(select(Analyzer).where(Analyzer.id.in_(analyzer_ids))).all()
+    }
+
+    attempts = list(
+        db.scalars(
+            select(AnalyzerOrderAttempt)
+            .where(AnalyzerOrderAttempt.worklist_item_id.in_(item_ids))
+            .order_by(
+                AnalyzerOrderAttempt.worklist_item_id.asc(),
+                AnalyzerOrderAttempt.attempt_no.desc(),
+                AnalyzerOrderAttempt.id.desc(),
+            )
+        ).all()
+    )
+    latest_attempt_by_item: dict[uuid.UUID, AnalyzerOrderAttempt] = {}
+    for attempt in attempts:
+        latest_attempt_by_item.setdefault(attempt.worklist_item_id, attempt)
+
+    output: list[AnalyzerWorklistRead] = []
+    for item in items:
+        specimen = specimens.get(item.specimen_id)
+        order = orders.get(item.order_id)
+        test = tests.get(item.test_id)
+        analyzer = analyzers.get(item.analyzer_id)
+        latest_attempt = latest_attempt_by_item.get(item.id)
+        output.append(
+            AnalyzerWorklistRead(
+                id=item.id,
+                specimen_id=item.specimen_id,
+                specimen_barcode=specimen.barcode if specimen else "Unknown",
+                accession_number=specimen.accession_number if specimen else None,
+                order_id=item.order_id,
+                order_number=order.order_number if order else "Unknown",
+                test_id=item.test_id,
+                lis_test_code=test.code if test else "Unknown",
+                test_name=test.name if test else "Unknown test",
+                analyzer_id=item.analyzer_id,
+                analyzer_code=analyzer.code if analyzer else "Unknown",
+                analyzer_name=(
+                    f"{analyzer.vendor} {analyzer.model}" if analyzer else "Unknown analyzer"
+                ),
+                mapping_id=item.mapping_id,
+                machine_test_code=item.machine_test_code,
+                status=item.status,
+                correlation_id=item.correlation_id,
+                cancelled_reason=item.cancelled_reason,
+                latest_attempt_no=latest_attempt.attempt_no if latest_attempt else None,
+                latest_attempt_state=latest_attempt.state if latest_attempt else None,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+        )
+    return output
+
+
 @router.get("/analyzer-worklist", response_model=Page[AnalyzerWorklistRead])
 def list_analyzer_worklist(
     db: Db,
@@ -3003,7 +3109,7 @@ def list_analyzer_worklist(
     total = rows[0].total_count if rows else 0
     if not rows and offset:
         total = db.scalar(select(func.count(AnalyzerWorklistItem.id)).where(*filters)) or 0
-    items = [worklist_item_read(db, item) for item, _ in rows]
+    items = worklist_item_reads(db, [item for item, _ in rows])
     return Page[AnalyzerWorklistRead](items=items, total=total, limit=limit, offset=offset)
 
 
@@ -3231,6 +3337,101 @@ def lab_result_read(db: Session, result: LabResult) -> LabResultRead:
     )
 
 
+def lab_result_reads(db: Session, results: list[LabResult]) -> list[LabResultRead]:
+    if not results:
+        return []
+    specimen_ids = {row.specimen_id for row in results}
+    order_ids = {row.order_id for row in results}
+    test_ids = {row.test_id for row in results}
+    analyzer_ids = {row.analyzer_id for row in results}
+    result_ids = [row.id for row in results]
+
+    specimens = {
+        row.id: row
+        for row in db.scalars(select(Specimen).where(Specimen.id.in_(specimen_ids))).all()
+    }
+    orders = {
+        row.id: row for row in db.scalars(select(LabOrder).where(LabOrder.id.in_(order_ids))).all()
+    }
+    patients = {
+        row.id: row
+        for row in db.scalars(
+            select(Patient).where(Patient.id.in_({order.patient_id for order in orders.values()}))
+        ).all()
+    }
+    tests = {
+        row.id: row
+        for row in db.scalars(select(TestCatalogItem).where(TestCatalogItem.id.in_(test_ids))).all()
+    }
+    analyzers = {
+        row.id: row
+        for row in db.scalars(select(Analyzer).where(Analyzer.id.in_(analyzer_ids))).all()
+    }
+    observations = list(
+        db.scalars(
+            select(LabResultObservation)
+            .where(LabResultObservation.result_id.in_(result_ids))
+            .order_by(LabResultObservation.result_id.asc(), LabResultObservation.sequence_no.asc())
+        ).all()
+    )
+    obs_by_result: dict[uuid.UUID, list[LabResultObservation]] = {}
+    for observation in observations:
+        obs_by_result.setdefault(observation.result_id, []).append(observation)
+
+    output: list[LabResultRead] = []
+    for result in results:
+        specimen = specimens.get(result.specimen_id)
+        order = orders.get(result.order_id)
+        patient = patients.get(order.patient_id) if order else None
+        test = tests.get(result.test_id)
+        analyzer = analyzers.get(result.analyzer_id)
+        output.append(
+            LabResultRead(
+                id=result.id,
+                worklist_item_id=result.worklist_item_id,
+                specimen_id=result.specimen_id,
+                specimen_barcode=specimen.barcode if specimen else "",
+                accession_number=specimen.accession_number if specimen else None,
+                order_id=result.order_id,
+                order_number=order.order_number if order else "",
+                patient_number=patient.patient_number if patient else "",
+                patient_name=patient.full_name if patient else "",
+                test_id=result.test_id,
+                lis_test_code=test.code if test else "",
+                test_name=test.name if test else "",
+                analyzer_id=result.analyzer_id,
+                analyzer_code=analyzer.code if analyzer else "",
+                status=result.status,
+                correlation_id=result.correlation_id,
+                report_number=result.report_number,
+                technical_reviewed_at=result.technical_reviewed_at,
+                technical_review_notes=result.technical_review_notes,
+                pathologist_validated_at=result.pathologist_validated_at,
+                pathologist_notes=result.pathologist_notes,
+                released_at=result.released_at,
+                observations=[
+                    LabResultObservationRead(
+                        id=item.id,
+                        sequence_no=item.sequence_no,
+                        parameter_id=item.parameter_id,
+                        machine_parameter_code=item.machine_parameter_code,
+                        parameter_name=item.parameter_name,
+                        value=item.value,
+                        unit=item.unit,
+                        reference_low=item.reference_low,
+                        reference_high=item.reference_high,
+                        reference_text=item.reference_text,
+                        flag=item.flag,
+                    )
+                    for item in obs_by_result.get(result.id, [])
+                ],
+                created_at=result.created_at,
+                updated_at=result.updated_at,
+            )
+        )
+    return output
+
+
 @router.get("/results", response_model=Page[LabResultRead])
 def list_lab_results(
     db: Db,
@@ -3248,6 +3449,7 @@ def list_lab_results(
         select(LabResult, func.count(LabResult.id).over().label("total_count"))
         .where(*filters)
         .order_by(LabResult.created_at.desc())
+        .options(selectinload(LabResult.observations))
         .limit(limit)
         .offset(offset)
     ).all()
@@ -3255,7 +3457,7 @@ def list_lab_results(
     if not rows and offset:
         total = db.scalar(select(func.count(LabResult.id)).where(*filters)) or 0
     return Page[LabResultRead](
-        items=[lab_result_read(db, item) for item, _ in rows],
+        items=lab_result_reads(db, [item for item, _ in rows]),
         total=total,
         limit=limit,
         offset=offset,
