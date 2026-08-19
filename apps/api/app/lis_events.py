@@ -6,8 +6,8 @@ generation for middleware-style integrations.
 
 from __future__ import annotations
 
-import socket
 import re
+import socket
 from dataclasses import dataclass
 
 from app.hl7_law import (
