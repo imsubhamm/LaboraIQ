@@ -91,6 +91,24 @@ The Mac and EC2 must both be connected to the same Tailscale network. Current an
 10. Map LIS test `BIO0231` to Mac simulator code `A4`.
 11. Test EC2-to-Mac TCP connection successfully.
 
+Optional scripted smoke run against a reachable API:
+
+```bash
+python3 tools/phase4_uat_smoke.py \
+  --api-base-url http://127.0.0.1:8000/api/v1 \
+  --test-code BIO0231 \
+  --phase3
+```
+
+One-command local drill (simulator + smoke):
+
+```bash
+python3 tools/phase4_local_drill.py \
+  --api-base-url http://127.0.0.1:8000/api/v1 \
+  --test-code BIO0231 \
+  --phase3
+```
+
 ## Barcode verification
 
 The barcode payload for the current UAT specimen is:
@@ -122,16 +140,43 @@ BIO0231 -> A4
 
 ## Current stopping point
 
-Order transmission and application ACK/ORU capture are implemented for `HL7_LAW`. The next UAT gate is result normalization and clinical release:
+Current implemented path for `HL7_LAW` UAT:
 
 - Worklist created from the accepted specimen.
 - Correct analyzer selected from the active mapping.
 - OML^O33 order transmitted over MLLP.
-- Application-level ACK (MSA AA) received.
+- Application-level ACK (MSA AA) received and correlated by control ID.
 - ORU result message returned and stored raw.
-- Result matched/normalized to the specimen and requested test (Phase 4).
-- Unit and reference range applied (Phase 4).
-- Result reviewed and released (Phase 4).
+- Result matched and normalized to the specimen and requested test.
+- Unit normalization, analyzer flag mapping, and OBX/NTE comment capture applied.
+- Result technical review, pathologist validation, release, and PDF generation available.
+- LIS-facing status/storage/routing messages can be generated and stored.
+- LIS dispatch supports `outbox_only` and `immediate` modes.
+
+See `docs/PHASE4_CUTOVER_CHECKLIST.md` for the dry-run and cutover sequence.
+
+## LIS operational messaging
+
+Phase 3/4 adds specimen operational messaging for middleware/LIS coordination:
+
+- Status: `ARRIV`
+- Storage: `SRACK`, `SPOS`
+- Routing support: routine codes plus aliquot `ATxx` and sorting `SORTxx`
+
+Relevant API endpoints:
+
+- `GET /api/v1/specimens/{barcode}/lis-routing-plan`
+- `POST /api/v1/specimens/{barcode}/lis-status`
+- `POST /api/v1/specimens/{barcode}/lis-storage`
+- `POST /api/v1/specimens/{barcode}/lis-routing-message`
+- `GET /api/v1/specimens/{barcode}/lis-messages`
+- `POST /api/v1/lis-messages/process`
+
+Suggested UAT mode:
+
+- Start with `LIS_DISPATCH_MODE=outbox_only`
+- Inspect generated payloads and endpoint reachability
+- Switch to `LIS_DISPATCH_MODE=immediate` only after dry-run confirmation
 
 ## Operational cautions
 

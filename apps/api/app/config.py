@@ -1,8 +1,8 @@
 from functools import lru_cache
-from typing import Annotated, Self
+from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -24,9 +24,14 @@ class Settings(BaseSettings):
     oidc_client_id: str | None = None
     oidc_jwks_url: str | None = None
     oidc_authorization_endpoint: str | None = None
-    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+    cors_origins: list[str] | str = "http://localhost:3000"
     # Comma-separated overlay IPs (e.g. Tailscale) allowed for analyzer TCP probes.
-    analyzer_overlay_targets: Annotated[list[str], NoDecode] = ["100.122.201.68"]
+    analyzer_overlay_targets: list[str] | str = "100.122.201.68"
+    lis_dispatch_mode: Literal["immediate", "outbox_only"] = "outbox_only"
+    lis_outbound_host: str | None = None
+    lis_outbound_port: int = Field(default=0, ge=0, le=65535)
+    lis_outbound_use_mllp: bool = True
+    lis_outbound_timeout_seconds: int = Field(default=5, ge=1, le=60)
     log_level: str = "INFO"
 
     @field_validator("cors_origins", "analyzer_overlay_targets", mode="before")

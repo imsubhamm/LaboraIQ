@@ -316,6 +316,9 @@ class TestCatalogParameter(Base, TimestampMixin):
     reference_low: Mapped[str | None] = mapped_column(String(40))
     reference_high: Mapped[str | None] = mapped_column(String(40))
     reference_text: Mapped[str | None] = mapped_column(String(200))
+    critical_low: Mapped[str | None] = mapped_column(String(40))
+    critical_high: Mapped[str | None] = mapped_column(String(40))
+    reference_source: Mapped[str | None] = mapped_column(String(200))
     test: Mapped[TestCatalogItem] = relationship(back_populates="parameters")
 
 
@@ -456,6 +459,29 @@ class LabResultObservation(Base, TimestampMixin):
     flag: Mapped[str | None] = mapped_column(String(20))
     raw_obx: Mapped[str | None] = mapped_column(Text)
     result: Mapped[LabResult] = relationship(back_populates="observations")
+
+
+class LisIntegrationMessage(Base):
+    __tablename__ = "lis_integration_messages"
+    __table_args__ = (
+        Index("ix_lis_messages_specimen_created", "organization_id", "specimen_id", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    specimen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("specimens.id"), index=True)
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lab_orders.id"), index=True)
+    event_category: Mapped[str] = mapped_column(String(30), index=True)
+    message_type: Mapped[str] = mapped_column(String(40))
+    content_type: Mapped[str] = mapped_column(String(80), default="application/hl7-v2")
+    body: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    correlation_id: Mapped[str] = mapped_column(String(100), index=True)
+    delivery_state: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_error: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class LabOrder(Base, TimestampMixin):
