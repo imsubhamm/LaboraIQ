@@ -4,6 +4,8 @@ Current development handoff: [`docs/CURSOR_HANDOFF.md`](docs/CURSOR_HANDOFF.md)
 
 Production and analyzer UAT runbook: [`docs/PRODUCTION_UAT_RUNBOOK.md`](docs/PRODUCTION_UAT_RUNBOOK.md)
 
+Phase 4 cutover checklist: [`docs/PHASE4_CUTOVER_CHECKLIST.md`](docs/PHASE4_CUTOVER_CHECKLIST.md)
+
 LaboraIQ is a cloud Laboratory Information System foundation that supports both
 existing-LIS enhancement (Mode A) and a future complete LIS (Mode B). Milestone 1
 contains tenant/branch configuration, identity abstraction, configurable RBAC,
@@ -50,6 +52,27 @@ cd apps/api && pip install -e ".[dev]" && pytest && ruff check . && mypy app
 cd apps/web && npm ci && npm test && npm run lint && npm run typecheck && npm run build
 cd infrastructure/terraform && terraform fmt -check -recursive && terraform init -backend=false && terraform validate
 ```
+
+## Analyzer integration notes
+
+HL7 LAW analyzer order/result flow is covered in the API and test suite. Phase 3/4
+operational messaging adds stored LIS-facing messages for:
+
+- specimen status (`ARRIV`)
+- storage (`SRACK`, `SPOS`)
+- routing / aliquot / sorting (`ATxx`, `SORTxx`)
+
+Dispatch behavior is controlled by:
+
+- `LIS_DISPATCH_MODE=outbox_only` to persist messages and send them later with `POST /api/v1/lis-messages/process`
+- `LIS_DISPATCH_MODE=immediate` to send them as soon as they are created
+
+Outbound LIS transport uses:
+
+- `LIS_OUTBOUND_HOST`
+- `LIS_OUTBOUND_PORT`
+- `LIS_OUTBOUND_USE_MLLP`
+- `LIS_OUTBOUND_TIMEOUT_SECONDS`
 
 ## Authentication and API context
 

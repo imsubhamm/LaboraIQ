@@ -162,30 +162,59 @@ def message_type(message: str) -> str:
     return field(msh, 9)
 
 
+def message_control_id(message: str) -> str:
+    msh = segment_map(message).get("MSH", [""])[0]
+    return field(msh, 10)
+
+
 def is_result_message(message: str) -> bool:
     msg_type = message_type(message).upper()
     return msg_type.startswith("ORU")
 
 
+def _is_hl7_v24_or_newer(message: str) -> bool:
+    msh = segment_map(message).get("MSH", [""])[0]
+    version = field(msh, 12).strip()
+    return version.startswith("2.4") or version.startswith("2.5")
+
+
 def extract_oru_observations(message: str) -> list[dict[str, str]]:
-    """Parse ORU OBX rows into plain observation dicts for result normalization."""
-    segments = segment_map(message)
+    """Parse ORU OBX rows into plain observation dicts for result normalization.
+
+    Supports HL7 v2.2 and v2.4+ OBX layouts and attaches trailing NTE comments
+    to the most recent OBX segment.
+    """
     barcode, _ = extract_order_fields(message)
+    is_v24 = _is_hl7_v24_or_newer(message)
+    value_field = 5 if is_v24 else 4
+    unit_field = 6 if is_v24 else 5
+    flags_field = 8 if is_v24 else 7
     observations: list[dict[str, str]] = []
-    for obx in segments.get("OBX", []):
-        identifier = field(obx, 3)
-        observations.append(
-            {
-                "sequence": field(obx, 1) or str(len(observations) + 1),
-                "value_type": field(obx, 2) or "ST",
-                "observation_code": component(identifier, 0),
-                "observation_name": component(identifier, 1) or component(identifier, 0),
-                "value": field(obx, 5),
-                "unit": field(obx, 6),
-                "abnormal_flags": field(obx, 8),
-                "barcode": barcode or "",
-            }
-        )
+    for line in message.replace("\n", "\r").split("\r"):
+        if not line:
+            continue
+        segment = line.split("|", 1)[0]
+        if segment == "OBX":
+            identifier = field(line, 3)
+            observations.append(
+                {
+                    "sequence": field(line, 1) or str(len(observations) + 1),
+                    "value_type": field(line, 2) or "ST",
+                    "observation_code": component(identifier, 0),
+                    "observation_name": component(identifier, 1) or component(identifier, 0),
+                    "value": field(line, value_field),
+                    "unit": field(line, unit_field),
+                    "abnormal_flags": field(line, flags_field),
+                    "comment": "",
+                    "barcode": barcode or "",
+                }
+            )
+            continue
+        if segment == "NTE" and observations:
+            note = field(line, 3).strip()
+            if note:
+                existing = observations[-1]["comment"]
+                observations[-1]["comment"] = f"{existing} | {note}" if existing else note
     return observations
 
 

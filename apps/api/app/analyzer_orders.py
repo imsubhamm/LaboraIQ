@@ -20,6 +20,7 @@ from app.auth import AuthContext
 from app.hl7_law import (
     build_oml_o33,
     is_result_message,
+    message_control_id,
     parse_ack,
     read_mllp_messages,
     unwrap_mllp,
@@ -314,7 +315,14 @@ def process_order_attempt(
             attempt.error = "HL7 ACK missing from analyzer response"
         else:
             ack = parse_ack(ack_message)
-            if ack.ok:
+            outbound_control_id = message_control_id(payload)
+            if ack.ok and outbound_control_id and ack.message_control_id != outbound_control_id:
+                attempt.state = "failed"
+                attempt.error = (
+                    "HL7 ACK control ID mismatch: "
+                    f"expected {outbound_control_id}, got {ack.message_control_id or 'EMPTY'}"
+                )[:500]
+            elif ack.ok:
                 success = True
                 attempt.state = "acknowledged"
                 attempt.error = None

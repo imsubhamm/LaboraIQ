@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_serializer, field_validator
 
 from app.models import Status
 
@@ -395,6 +395,65 @@ class AnalyzerMessageRead(APIModel):
     created_at: datetime
 
 
+class LisIntegrationMessageRead(APIModel):
+    id: uuid.UUID
+    specimen_id: uuid.UUID
+    order_id: uuid.UUID
+    event_category: str
+    message_type: str
+    content_type: str
+    body: str
+    payload_hash: str
+    correlation_id: str
+    delivery_state: str
+    delivered_at: datetime | None
+    delivery_error: str | None
+    created_at: datetime
+
+
+class LisStatusDispatch(APIModel):
+    module_id: str = Field(min_length=1, max_length=40, default="90")
+    status_code: str = Field(min_length=1, max_length=10, default="I")
+    event_code: str = Field(min_length=1, max_length=40, default="ARRIV")
+    event_value: str = Field(min_length=1, max_length=40, default="1")
+
+
+class LisStorageDispatch(APIModel):
+    module_id: str = Field(min_length=1, max_length=40, default="90")
+    rack_id: str = Field(min_length=1, max_length=60)
+    position: str = Field(min_length=1, max_length=20)
+    carrier_type: str = Field(min_length=1, max_length=80, default="ESFlex80pos")
+
+
+class LisRoutingCodeRead(APIModel):
+    code: str
+    category: str
+
+
+class LisRoutingPlanRead(APIModel):
+    specimen_barcode: str
+    accession_number: str | None
+    order_number: str
+    fluid: str
+    routing_codes: list[LisRoutingCodeRead]
+    message_preview: str
+
+
+class LisDispatchProcessRead(APIModel):
+    processed: int
+    sent: int
+    failed: int
+    message_ids: list[uuid.UUID]
+
+
+class LisMessageQueueSummaryRead(APIModel):
+    pending: int
+    failed: int
+    sent: int
+    oldest_pending_age_seconds: int | None
+    oldest_failed_age_seconds: int | None
+
+
 class AnalyzerOrderAttemptRead(APIModel):
     id: uuid.UUID
     worklist_item_id: uuid.UUID
@@ -476,6 +535,11 @@ class TestMasterCreate(APIModel):
     specimen_type: str = Field(min_length=2, max_length=80)
     container_type: str = Field(default="Unspecified", min_length=2, max_length=100)
     price: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @field_serializer("price")
+    def serialize_price(self, value: Decimal) -> Decimal:
+        # Ensure stable 2-decimal formatting for UI + import tests.
+        return value.quantize(Decimal("0.01"))
 
 
 class TestMasterUpdate(APIModel):

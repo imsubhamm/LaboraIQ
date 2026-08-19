@@ -6,8 +6,10 @@ from app.hl7_law import (
     build_ack,
     build_oml_o33,
     build_oru_r01,
+    extract_oru_observations,
     extract_order_fields,
     is_result_message,
+    message_control_id,
     parse_ack,
     unwrap_mllp,
     wrap_mllp,
@@ -55,6 +57,23 @@ def test_parse_ack_aa_and_ae() -> None:
     assert "bad barcode" in parsed_ae.text
 
 
+def test_message_control_id_from_oml() -> None:
+    order = build_oml_o33(
+        analyzer_code="MAC-UAT-01",
+        barcode="LQ0805063919C2AA0601",
+        accession="ACC-1",
+        machine_test_code="A4",
+        test_name="Androstenedione Test",
+        patient_number="PT-1",
+        patient_name="UAT Patient One",
+        patient_sex="Female",
+        order_number="ORD-1",
+        correlation_id="corr-123",
+        message_control_id="MSG001",
+    )
+    assert message_control_id(order) == "MSG001"
+
+
 def test_oru_detected_as_result() -> None:
     oru = build_oru_r01(
         analyzer_code="MAC-UAT-01",
@@ -75,3 +94,35 @@ def test_oru_detected_as_result() -> None:
     assert len(observations) == 1
     assert observations[0]["observation_code"] == "ANDRO"
     assert observations[0]["value"] == "1.8"
+
+
+def test_extract_oru_v22_layout_and_nte_comment() -> None:
+    message = (
+        "MSH|^~\\&|IM||||20260808133520||ORU^R01|498|P|2.2|||AL|NE\r"
+        "PID|1||333||Last^First\r"
+        "OBR|1|S0914002|||R\r"
+        "OBX|1|NM|NA|142|mmol/L||Hef0~Ief0~Tef0~ef0|||V|||20170914133519||Tech_Id||56001\r"
+        "NTE|1|L|Reactive\r"
+    )
+    observations = extract_oru_observations(message)
+    assert len(observations) == 1
+    assert observations[0]["value"] == "142"
+    assert observations[0]["unit"] == "mmol/L"
+    assert observations[0]["abnormal_flags"] == "Hef0~Ief0~Tef0~ef0"
+    assert observations[0]["comment"] == "Reactive"
+
+
+def test_extract_oru_v24_layout_uses_correct_obx_fields() -> None:
+    message = (
+        "MSH|^~\\&|IM||||20260808115600||ORU^R01|724|P|2.4|||AL|NE\r"
+        "PID|1||2024505717|2024505717|Patient^Phase2\r"
+        "OBR|1|OP108603|||R\r"
+        "OBX|1|NM|URIC||3.6|mg/dL||efQ|||V|||20260807193325||Tech_Id||56005266\r"
+        "NTE|1|L|Negative\r"
+    )
+    observations = extract_oru_observations(message)
+    assert len(observations) == 1
+    assert observations[0]["value"] == "3.6"
+    assert observations[0]["unit"] == "mg/dL"
+    assert observations[0]["abnormal_flags"] == "efQ"
+    assert observations[0]["comment"] == "Negative"

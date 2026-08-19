@@ -36,6 +36,64 @@ def _parse_number(value: str | None) -> float | None:
         return None
 
 
+def normalize_observation_value(value: str | None) -> str:
+    if value is None:
+        return ""
+    cleaned = value.strip()
+    compact = cleaned.replace(" ", "").lower()
+    if compact in {"noresult", "nr"}:
+        return "No Result"
+    return cleaned
+
+
+def normalize_unit(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = " ".join(value.strip().split())
+    if not cleaned:
+        return None
+    aliases = {
+        "mg/dl": "mg/dL",
+        "g/dl": "g/dL",
+        "ng/ml": "ng/mL",
+        "pg/ml": "pg/mL",
+        "iu/l": "IU/L",
+        "iu/ml": "IU/mL",
+        "miu/l": "mIU/L",
+        "mmol/l": "mmol/L",
+        "umol/l": "umol/L",
+        "meq/l": "meq/L",
+        "u/l": "U/L",
+        "giu/l": "GIU/L",
+    }
+    return aliases.get(cleaned.lower(), cleaned)
+
+
+def _derive_flag_from_analyzer_flags(analyzer_flags: str | None) -> str | None:
+    if not analyzer_flags:
+        return None
+    tokens = [
+        token.strip()
+        for token in analyzer_flags.replace("\\", "~").split("~")
+        if token.strip()
+    ]
+    upper_tokens = [token.upper() for token in tokens]
+    if "NR" in upper_tokens:
+        return "NR"
+    if "HH" in upper_tokens:
+        return "HH"
+    if "LL" in upper_tokens:
+        return "LL"
+    if "EF4" in upper_tokens or "EFS" in upper_tokens or "OR" in upper_tokens:
+        return "H"
+    if "EF5" in upper_tokens:
+        return "L"
+    for token in ("HH", "LL", "H", "L", "N"):
+        if token in upper_tokens:
+            return token
+    return upper_tokens[0][:20] if upper_tokens else None
+
+
 def compute_flag(
     value: str,
     *,
@@ -45,8 +103,9 @@ def compute_flag(
     critical_low: str | None = None,
     critical_high: str | None = None,
 ) -> str | None:
-    if analyzer_flags:
-        return analyzer_flags.strip().upper()[:20] or None
+    derived = _derive_flag_from_analyzer_flags(analyzer_flags)
+    if derived:
+        return derived
     number = _parse_number(value)
     if number is None:
         return None
@@ -168,17 +227,19 @@ def normalize_worklist_result(
             catalog = db.get(TestCatalogParameter, mapping.parameter_id)
         if catalog is None:
             catalog = catalog_params.get(code)
-        unit = (
+        analyzer_unit = normalize_unit(raw.get("unit") or None)
+        unit = normalize_unit(
             (mapping.unit if mapping and mapping.unit else None)
             or (catalog.unit if catalog else None)
-            or (raw.get("unit") or None)
+            or analyzer_unit
         )
         reference_low = catalog.reference_low if catalog else None
         reference_high = catalog.reference_high if catalog else None
         reference_text = catalog.reference_text if catalog else None
         critical_low = catalog.critical_low if catalog else None
         critical_high = catalog.critical_high if catalog else None
-        value = raw.get("value") or ""
+        value = normalize_observation_value(raw.get("value"))
+        comment = (raw.get("comment") or "").strip()
         observation = LabResultObservation(
             result_id=result.id,
             sequence_no=int(raw.get("sequence") or index),
@@ -201,7 +262,11 @@ def normalize_worklist_result(
                 critical_high=critical_high,
                 analyzer_flags=raw.get("abnormal_flags"),
             ),
-            raw_obx=str(raw),
+            raw_obx=(
+                f"{raw} | analyzer_unit={analyzer_unit} | comment={comment}"
+                if comment
+                else f"{raw} | analyzer_unit={analyzer_unit}"
+            ),
         )
         db.add(observation)
 

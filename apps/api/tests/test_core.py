@@ -404,6 +404,11 @@ def test_environment_origin_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Settings().cors_origins == ["https://admin.example.com", "http://localhost:3000"]
 
 
+def test_lis_dispatch_mode_defaults_to_outbox_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LIS_DISPATCH_MODE", raising=False)
+    assert Settings().lis_dispatch_mode == "outbox_only"
+
+
 def test_returning_patient_is_updated_and_history_is_appended(
     client: TestClient, db: Session, context: AuthContext
 ) -> None:
@@ -846,6 +851,180 @@ def test_accepting_specimen_creates_analyzer_worklist_item(
     assert cancelled.json()["status"] == "cancelled"
 
 
+def test_phase3_lis_status_storage_and_routing_support(
+    client: TestClient, db: Session, context: AuthContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    routine_test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Routine Chemistry",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    aliquot_test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="ALIQ001",
+        name="Aliquot Request",
+        specimen_type="Serum",
+        container_type="SST",
+        price="100.00",
+    )
+    sorting_test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="SORT001",
+        name="Sorting Request",
+        specimen_type="Serum",
+        container_type="SST",
+        price="100.00",
+    )
+    db.add_all([branch, routine_test, aliquot_test, sorting_test])
+    db.commit()
+
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "MAC-UAT-01",
+            "vendor": "LaboraIQ",
+            "model": "Mac Simulator",
+            "protocol": "HL7_LAW",
+            "host": "192.168.10.80",
+            "port": 55001,
+            "connection_mode": "bidirectional",
+        },
+    ).json()
+    for test_id, machine_code in (
+        (routine_test.id, "A4"),
+        (aliquot_test.id, "AT05"),
+        (sorting_test.id, "SORT01"),
+    ):
+        mapped = client.post(
+            f"/api/v1/analyzers/{analyzer['id']}/mappings",
+            json={"test_id": str(test_id), "machine_test_code": machine_code, "parameters": []},
+        )
+        assert mapped.status_code == 201
+
+    intake = client.post(
+        "/api/v1/intake-workflows",
+        json={
+            "full_name": "Phase3 Patient",
+            "phone": "+919811122266",
+            "email": "phase3@example.com",
+            "age_years": 30,
+            "sex": "Female",
+            "blood_group": "A+",
+            "country": "India",
+            "race": "Asian",
+            "nationality": "Indian",
+            "visit_type": "OP",
+            "department": "Medicine",
+            "ward": "OP Clinic",
+            "doctor_name": "Dr Example",
+            "diagnosis": "Z00.0",
+            "test_ids": [str(routine_test.id), str(aliquot_test.id), str(sorting_test.id)],
+        },
+    )
+    assert intake.status_code == 201
+    payment = client.post(
+        f"/api/v1/orders/{intake.json()['order_id']}/payment",
+        json={"payment_method": "CASH"},
+    )
+    assert payment.status_code == 200
+    barcode = payment.json()["specimens"][0]["barcode"]
+    assert (
+        client.post(
+            f"/api/v1/specimens/{barcode}/collect",
+            json={"collection_location": "OP", "container_count": 1},
+        ).status_code
+        == 200
+    )
+    assert client.post(f"/api/v1/specimens/{barcode}/receive").status_code == 200
+    assert client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"}).status_code == 200
+
+    plan = client.get(f"/api/v1/specimens/{barcode}/lis-routing-plan")
+    assert plan.status_code == 200
+    routing_codes = {item["code"]: item["category"] for item in plan.json()["routing_codes"]}
+    assert routing_codes["A4"] == "routine"
+    assert routing_codes["AT05"] == "aliquot"
+    assert routing_codes["SORT01"] == "sorting"
+    assert "OBR|2" in plan.json()["message_preview"]
+    assert "AT05" in plan.json()["message_preview"]
+    assert "SORT01" in plan.json()["message_preview"]
+
+    status_messages = client.post(
+        f"/api/v1/specimens/{barcode}/lis-status",
+        json={"module_id": "90", "event_code": "ARRIV", "event_value": "1"},
+    )
+    assert status_messages.status_code == 200
+    assert len(status_messages.json()) == 2
+    assert any("ARRIV" in item["body"] for item in status_messages.json())
+
+    storage_messages = client.post(
+        f"/api/v1/specimens/{barcode}/lis-storage",
+        json={"module_id": "90", "rack_id": "RACK-07", "position": "12", "carrier_type": "ESFlex80pos"},
+    )
+    assert storage_messages.status_code == 200
+    assert len(storage_messages.json()) == 2
+    assert any("SRACK" in item["body"] for item in storage_messages.json())
+    assert any("SPOS" in item["body"] for item in storage_messages.json())
+
+    routing_message = client.post(f"/api/v1/specimens/{barcode}/lis-routing-message")
+    assert routing_message.status_code == 200
+    assert routing_message.json()["event_category"] == "routing"
+    assert "AT05" in routing_message.json()["body"]
+    assert "SORT01" in routing_message.json()["body"]
+
+    all_messages = client.get(f"/api/v1/specimens/{barcode}/lis-messages")
+    assert all_messages.status_code == 200
+    assert len(all_messages.json()) == 5
+    categories = {item["event_category"] for item in all_messages.json()}
+    assert categories == {"status", "storage", "routing"}
+    assert {item["delivery_state"] for item in all_messages.json()} == {"pending"}
+    summary_before = client.get("/api/v1/lis-messages/queue-summary")
+    assert summary_before.status_code == 200
+    assert summary_before.json()["pending"] == 5
+    assert summary_before.json()["failed"] == 0
+    assert summary_before.json()["oldest_pending_age_seconds"] is not None
+
+    def fake_dispatch(message):
+        if message.event_category == "storage":
+            return False, "simulated LIS timeout"
+        return True, "ACK AA"
+
+    monkeypatch.setattr(api_module, "dispatch_lis_message", fake_dispatch)
+    processed = client.post("/api/v1/lis-messages/process", params={"limit": 10})
+    assert processed.status_code == 200
+    assert processed.json()["processed"] == 5
+    assert processed.json()["sent"] == 3
+    assert processed.json()["failed"] == 2
+
+    updated_messages = client.get(f"/api/v1/specimens/{barcode}/lis-messages")
+    assert updated_messages.status_code == 200
+    by_category = {}
+    for item in updated_messages.json():
+        by_category.setdefault(item["event_category"], []).append(item)
+    assert all(item["delivery_state"] == "sent" for item in by_category["status"])
+    assert all(item["delivery_state"] == "failed" for item in by_category["storage"])
+    assert by_category["storage"][0]["delivery_error"] == "simulated LIS timeout"
+    assert all(item["delivery_state"] == "sent" for item in by_category["routing"])
+    summary_after = client.get("/api/v1/lis-messages/queue-summary")
+    assert summary_after.status_code == 200
+    assert summary_after.json()["pending"] == 0
+    assert summary_after.json()["failed"] == 2
+    assert summary_after.json()["sent"] == 3
+    assert summary_after.json()["oldest_failed_age_seconds"] is not None
+    failed_rows = client.get(
+        "/api/v1/lis-messages",
+        params={"delivery_state": "failed", "event_category": "storage", "older_than_minutes": 0},
+    )
+    assert failed_rows.status_code == 200
+    assert failed_rows.json()["total"] == 2
+    assert all(item["delivery_state"] == "failed" for item in failed_rows.json()["items"])
+    assert all(item["event_category"] == "storage" for item in failed_rows.json()["items"])
+
+
 def test_order_queue_sends_stub_payload_retries_then_fails(
     client: TestClient,
     db: Session,
@@ -1040,6 +1219,102 @@ def test_order_queue_marks_acknowledged_on_tcp_success(
     item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
     assert item["status"] == "completed"
     assert item["latest_attempt_state"] == "acknowledged"
+
+
+def test_hl7_law_ack_control_id_mismatch_fails_attempt(
+    client: TestClient,
+    db: Session,
+    context: AuthContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.hl7_law import build_ack
+
+    branch = Branch(organization_id=context.organization_id, name="Central", code="CENTRAL")
+    test = TestCatalogItem(
+        organization_id=context.organization_id,
+        code="BIO0231",
+        name="Androstenedione Test",
+        specimen_type="Serum",
+        container_type="SST",
+        price="900.00",
+    )
+    db.add_all([branch, test])
+    db.commit()
+    analyzer = client.post(
+        "/api/v1/analyzers",
+        json={
+            "branch_id": str(branch.id),
+            "code": "MAC-HL7-ACK-MISMATCH",
+            "vendor": "LaboraIQ",
+            "model": "Stub Simulator",
+            "protocol": "HL7_LAW",
+            "host": "127.0.0.1",
+            "port": 55001,
+            "connection_mode": "bidirectional",
+            "retry_limit": 0,
+        },
+    ).json()
+    assert (
+        client.post(
+            f"/api/v1/analyzers/{analyzer['id']}/mappings",
+            json={"test_id": str(test.id), "machine_test_code": "A4", "parameters": []},
+        ).status_code
+        == 201
+    )
+    intake = client.post(
+        "/api/v1/intake-workflows",
+        json={
+            "full_name": "Ack Mismatch Patient",
+            "phone": "+919811122255",
+            "email": "ack-mismatch@example.com",
+            "age_years": 30,
+            "sex": "Male",
+            "blood_group": "B+",
+            "country": "India",
+            "race": "Asian",
+            "nationality": "Indian",
+            "visit_type": "OP",
+            "department": "Medicine",
+            "ward": "OP Clinic",
+            "doctor_name": "Dr Example",
+            "diagnosis": "Z00.0",
+            "test_ids": [str(test.id)],
+        },
+    ).json()
+    barcode = client.post(
+        f"/api/v1/orders/{intake['order_id']}/payment", json={"payment_method": "CASH"}
+    ).json()["specimens"][0]["barcode"]
+    client.post(
+        f"/api/v1/specimens/{barcode}/collect",
+        json={"collection_location": "OP", "container_count": 1},
+    )
+    client.post(f"/api/v1/specimens/{barcode}/receive")
+    client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"})
+    item_id = client.get("/api/v1/analyzer-worklist", params={"status": "pending"}).json()["items"][
+        0
+    ]["id"]
+    client.post(f"/api/v1/analyzer-worklist/{item_id}/enqueue")
+
+    import app.analyzer_orders as orders
+
+    def send_ack_with_wrong_control_id(analyzer_obj, payload: str, **kwargs):
+        del analyzer_obj, payload, kwargs
+        bad_ack = build_ack(
+            ack_code="AA",
+            message_control_id="WRONG-CONTROL-ID",
+            text="accepted",
+            analyzer_code="SIM",
+        )
+        return True, "MLLP exchange completed", [bad_ack]
+
+    monkeypatch.setattr(orders, "send_order_over_tcp", send_ack_with_wrong_control_id)
+    processed = client.post("/api/v1/analyzer-orders/process")
+    assert processed.status_code == 200
+    attempt = processed.json()["attempts"][0]
+    assert attempt["state"] == "failed"
+    assert "control ID mismatch" in (attempt["error"] or "")
+    item = client.get("/api/v1/analyzer-worklist").json()["items"][0]
+    assert item["status"] == "failed"
 
 
 def test_hl7_law_order_requires_ack_and_stores_oru(
@@ -1327,3 +1602,17 @@ def test_hl7_law_nak_fails_attempt(
         stop.set()
         server.close()
         thread.join(timeout=2)
+
+
+def test_result_helpers_normalize_no_result_and_analyzer_flags() -> None:
+    from app.results import compute_flag, normalize_observation_value, normalize_unit
+
+    assert normalize_observation_value(" NoResult ") == "No Result"
+    assert normalize_observation_value("NR") == "No Result"
+    assert normalize_unit("mg/dl") == "mg/dL"
+    assert normalize_unit("  ng/ml  ") == "ng/mL"
+    assert normalize_unit("mmol/L") == "mmol/L"
+    assert compute_flag("No Result", reference_low=None, reference_high=None, analyzer_flags="NR") == "NR"
+    assert compute_flag("<15", reference_low=None, reference_high=None, analyzer_flags="ef5") == "L"
+    assert compute_flag(">625", reference_low=None, reference_high=None, analyzer_flags="ef4") == "H"
+    assert compute_flag("999", reference_low=None, reference_high=None, analyzer_flags="LL~HH") == "HH"

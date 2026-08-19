@@ -1,8 +1,9 @@
 import ipaddress
+import hashlib
 import socket
 import time
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar, cast
 
@@ -29,6 +30,13 @@ from app.auth import Auth, AuthContext, load_context_for_identity, require_permi
 from app.catalogue import recompute_validation_status
 from app.config import get_settings
 from app.database import get_db
+from app.lis_events import (
+    build_routing_order_message,
+    build_routing_plan,
+    build_status_dispatch_messages,
+    build_storage_dispatch_messages,
+    send_lis_message_over_tcp,
+)
 from app.models import (
     Analyzer,
     AnalyzerConnectionEvent,
@@ -42,6 +50,7 @@ from app.models import (
     Invoice,
     LabOrder,
     LabResult,
+    LisIntegrationMessage,
     OrderTest,
     Organization,
     Patient,
@@ -96,6 +105,13 @@ from app.schemas import (
     LabResultNotes,
     LabResultObservationRead,
     LabResultRead,
+    LisIntegrationMessageRead,
+    LisDispatchProcessRead,
+    LisMessageQueueSummaryRead,
+    LisRoutingCodeRead,
+    LisRoutingPlanRead,
+    LisStatusDispatch,
+    LisStorageDispatch,
     OidcMetadataRead,
     OidcSessionCreate,
     OrganizationCreate,
@@ -167,6 +183,10 @@ def flush(db: Session) -> None:
         raise HTTPException(
             status_code=409, detail="A record with this code already exists"
         ) from error
+
+
+def payload_hash(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def get_tenant_record(
@@ -2180,6 +2200,93 @@ def specimen_workflow_read(db: Session, specimen: Specimen) -> SpecimenWorkflowR
     )
 
 
+def lis_integration_message_read(message: LisIntegrationMessage) -> LisIntegrationMessageRead:
+    return LisIntegrationMessageRead(
+        id=message.id,
+        specimen_id=message.specimen_id,
+        order_id=message.order_id,
+        event_category=message.event_category,
+        message_type=message.message_type,
+        content_type=message.content_type,
+        body=message.body,
+        payload_hash=message.payload_hash,
+        correlation_id=message.correlation_id,
+        delivery_state=message.delivery_state,
+        delivered_at=message.delivered_at,
+        delivery_error=message.delivery_error,
+        created_at=message.created_at,
+    )
+
+
+def store_lis_integration_messages(
+    db: Session,
+    *,
+    context: AuthContext,
+    specimen: Specimen,
+    event_category: str,
+    messages: list[tuple[str, str]],
+    correlation_id: str,
+) -> list[LisIntegrationMessage]:
+    stored: list[LisIntegrationMessage] = []
+    for message_type, body in messages:
+        row = LisIntegrationMessage(
+            organization_id=context.organization_id,
+            branch_id=specimen.branch_id,
+            specimen_id=specimen.id,
+            order_id=specimen.order_id,
+            event_category=event_category,
+            message_type=message_type,
+            content_type="application/hl7-v2; version=2.4",
+            body=body,
+            payload_hash=payload_hash(body),
+            correlation_id=correlation_id,
+            delivery_state="pending",
+            created_by=context.user_id,
+        )
+        db.add(row)
+        flush(db)
+        stored.append(row)
+    return stored
+
+
+def dispatch_lis_message(message: LisIntegrationMessage) -> tuple[bool, str]:
+    settings = get_settings()
+    host = (settings.lis_outbound_host or "").strip()
+    if not host or settings.lis_outbound_port <= 0:
+        return False, "LIS outbound host/port is not configured"
+    return send_lis_message_over_tcp(
+        host=host,
+        port=settings.lis_outbound_port,
+        payload=message.body,
+        use_mllp=settings.lis_outbound_use_mllp,
+        timeout_seconds=float(settings.lis_outbound_timeout_seconds),
+    )
+
+
+def maybe_dispatch_lis_messages(
+    db: Session, messages: list[LisIntegrationMessage]
+) -> tuple[int, int]:
+    settings = get_settings()
+    if settings.lis_dispatch_mode != "immediate":
+        return 0, 0
+    host = (settings.lis_outbound_host or "").strip()
+    if not host or settings.lis_outbound_port <= 0:
+        return 0, 0
+    sent = 0
+    failed = 0
+    for row in messages:
+        ok, detail = dispatch_lis_message(row)
+        row.delivery_state = "sent" if ok else "failed"
+        row.delivered_at = datetime.now(UTC) if ok else None
+        row.delivery_error = None if ok else detail[:500]
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+        flush(db)
+    return sent, failed
+
+
 def get_specimen_by_barcode(db: Session, barcode: str, context: AuthContext) -> Specimen:
     specimen = db.scalar(
         select(Specimen).where(
@@ -2369,6 +2476,381 @@ def review_specimen(
     )
     commit(db)
     return specimen_workflow_read(db, specimen)
+
+
+@router.get(
+    "/specimens/{barcode}/lis-messages",
+    response_model=list[LisIntegrationMessageRead],
+)
+def list_specimen_lis_messages(
+    barcode: str,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+) -> list[LisIntegrationMessageRead]:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    rows = db.scalars(
+        select(LisIntegrationMessage)
+        .where(
+            LisIntegrationMessage.organization_id == context.organization_id,
+            LisIntegrationMessage.specimen_id == specimen.id,
+        )
+        .order_by(LisIntegrationMessage.created_at.desc(), LisIntegrationMessage.id.desc())
+    ).all()
+    return [lis_integration_message_read(row) for row in rows]
+
+
+@router.post(
+    "/specimens/{barcode}/lis-status",
+    response_model=list[LisIntegrationMessageRead],
+)
+def dispatch_specimen_status_message(
+    barcode: str,
+    payload: LisStatusDispatch,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> list[LisIntegrationMessageRead]:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    control_id = f"STS-{barcode}-{uuid.uuid4().hex[:8].upper()}"
+    messages = build_status_dispatch_messages(
+        barcode=specimen.barcode,
+        module_id=payload.module_id.strip(),
+        control_id=control_id,
+        status_code=payload.status_code.strip(),
+        event_code=payload.event_code.strip().upper(),
+        event_value=payload.event_value.strip(),
+    )
+    stored = store_lis_integration_messages(
+        db,
+        context=context,
+        specimen=specimen,
+        event_category="status",
+        messages=messages,
+        correlation_id=correlation_id,
+    )
+    sent, failed = maybe_dispatch_lis_messages(db, stored)
+    record_event(
+        db,
+        request,
+        context,
+        event_type="lis.status_dispatched",
+        entity_type="specimen",
+        entity_id=specimen.id,
+        branch_id=specimen.branch_id,
+        action="dispatch",
+        new={
+            "status_code": payload.status_code,
+            "event_code": payload.event_code,
+            "event_value": payload.event_value,
+            "message_count": len(stored),
+            "sent_count": sent,
+            "failed_count": failed,
+        },
+    )
+    commit(db)
+    return [lis_integration_message_read(row) for row in stored]
+
+
+@router.post(
+    "/specimens/{barcode}/lis-storage",
+    response_model=list[LisIntegrationMessageRead],
+)
+def dispatch_specimen_storage_message(
+    barcode: str,
+    payload: LisStorageDispatch,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> list[LisIntegrationMessageRead]:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    control_id = f"STO-{barcode}-{uuid.uuid4().hex[:8].upper()}"
+    messages = build_storage_dispatch_messages(
+        barcode=specimen.barcode,
+        module_id=payload.module_id.strip(),
+        rack_id=payload.rack_id.strip(),
+        position=payload.position.strip(),
+        carrier_type=payload.carrier_type.strip(),
+        control_id=control_id,
+    )
+    stored = store_lis_integration_messages(
+        db,
+        context=context,
+        specimen=specimen,
+        event_category="storage",
+        messages=messages,
+        correlation_id=correlation_id,
+    )
+    sent, failed = maybe_dispatch_lis_messages(db, stored)
+    record_event(
+        db,
+        request,
+        context,
+        event_type="lis.storage_dispatched",
+        entity_type="specimen",
+        entity_id=specimen.id,
+        branch_id=specimen.branch_id,
+        action="dispatch",
+        new={
+            "rack_id": payload.rack_id,
+            "position": payload.position,
+            "carrier_type": payload.carrier_type,
+            "message_count": len(stored),
+            "sent_count": sent,
+            "failed_count": failed,
+        },
+    )
+    commit(db)
+    return [lis_integration_message_read(row) for row in stored]
+
+
+@router.get(
+    "/specimens/{barcode}/lis-routing-plan",
+    response_model=LisRoutingPlanRead,
+)
+def get_specimen_lis_routing_plan(
+    barcode: str,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+) -> LisRoutingPlanRead:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    order = db.get(LabOrder, specimen.order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Specimen order was not found")
+    patient = db.get(Patient, order.patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient record was not found")
+    machine_codes = db.scalars(
+        select(AnalyzerWorklistItem.machine_test_code).where(
+            AnalyzerWorklistItem.organization_id == context.organization_id,
+            AnalyzerWorklistItem.specimen_id == specimen.id,
+        )
+    ).all()
+    routing_codes = build_routing_plan(list(machine_codes))
+    fluid = specimen.specimen_type.strip().upper() or "SER"
+    preview = build_routing_order_message(
+        barcode=specimen.barcode,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        fluid=fluid,
+        ordering_physician=order.doctor_name or "UNKNOWN",
+        control_id=f"ROUTE-{specimen.barcode}",
+        routing_codes=routing_codes,
+    )
+    return LisRoutingPlanRead(
+        specimen_barcode=specimen.barcode,
+        accession_number=specimen.accession_number,
+        order_number=order.order_number,
+        fluid=fluid,
+        routing_codes=[
+            LisRoutingCodeRead(code=item.code, category=item.category) for item in routing_codes
+        ],
+        message_preview=preview,
+    )
+
+
+@router.post(
+    "/specimens/{barcode}/lis-routing-message",
+    response_model=LisIntegrationMessageRead,
+)
+def dispatch_specimen_routing_message(
+    barcode: str,
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+) -> LisIntegrationMessageRead:
+    specimen = get_specimen_by_barcode(db, barcode, context)
+    order = db.get(LabOrder, specimen.order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Specimen order was not found")
+    patient = db.get(Patient, order.patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient record was not found")
+    machine_codes = db.scalars(
+        select(AnalyzerWorklistItem.machine_test_code).where(
+            AnalyzerWorklistItem.organization_id == context.organization_id,
+            AnalyzerWorklistItem.specimen_id == specimen.id,
+        )
+    ).all()
+    routing_codes = build_routing_plan(list(machine_codes))
+    if not routing_codes:
+        raise HTTPException(status_code=409, detail="No analyzer routing codes available")
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    body = build_routing_order_message(
+        barcode=specimen.barcode,
+        patient_number=patient.patient_number,
+        patient_name=patient.full_name,
+        fluid=specimen.specimen_type.strip().upper() or "SER",
+        ordering_physician=order.doctor_name or "UNKNOWN",
+        control_id=f"ROUTE-{barcode}-{uuid.uuid4().hex[:8].upper()}",
+        routing_codes=routing_codes,
+    )
+    stored = store_lis_integration_messages(
+        db,
+        context=context,
+        specimen=specimen,
+        event_category="routing",
+        messages=[("ORU^R01", body)],
+        correlation_id=correlation_id,
+    )[0]
+    sent, failed = maybe_dispatch_lis_messages(db, [stored])
+    record_event(
+        db,
+        request,
+        context,
+        event_type="lis.routing_dispatched",
+        entity_type="specimen",
+        entity_id=specimen.id,
+        branch_id=specimen.branch_id,
+        action="dispatch",
+        new={
+            "routing_codes": [item.code for item in routing_codes],
+            "aliquot_codes": [item.code for item in routing_codes if item.category == "aliquot"],
+            "sorting_codes": [item.code for item in routing_codes if item.category == "sorting"],
+            "sent_count": sent,
+            "failed_count": failed,
+        },
+    )
+    commit(db)
+    return lis_integration_message_read(stored)
+
+
+@router.post("/lis-messages/process", response_model=LisDispatchProcessRead)
+def process_lis_message_outbox(
+    request: Request,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.manage"))],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> LisDispatchProcessRead:
+    filters = [
+        LisIntegrationMessage.organization_id == context.organization_id,
+        LisIntegrationMessage.delivery_state.in_(("pending", "failed")),
+    ]
+    if not context.is_organization_scoped:
+        filters.append(LisIntegrationMessage.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
+    rows = db.scalars(
+        select(LisIntegrationMessage)
+        .where(*filters)
+        .order_by(LisIntegrationMessage.created_at.asc(), LisIntegrationMessage.id.asc())
+        .limit(limit)
+    ).all()
+    sent = 0
+    failed = 0
+    ids: list[uuid.UUID] = []
+    for row in rows:
+        ok, detail = dispatch_lis_message(row)
+        row.delivery_state = "sent" if ok else "failed"
+        row.delivered_at = datetime.now(UTC) if ok else None
+        row.delivery_error = None if ok else detail[:500]
+        ids.append(row.id)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+        record_event(
+            db,
+            request,
+            context,
+            event_type="lis.message_dispatched" if ok else "lis.message_failed",
+            entity_type="lis_integration_message",
+            entity_id=row.id,
+            branch_id=row.branch_id,
+            action="dispatch",
+            new={
+                "event_category": row.event_category,
+                "message_type": row.message_type,
+                "delivery_state": row.delivery_state,
+                "delivery_error": row.delivery_error,
+            },
+        )
+    commit(db)
+    return LisDispatchProcessRead(processed=len(rows), sent=sent, failed=failed, message_ids=ids)
+
+
+@router.get("/lis-messages/queue-summary", response_model=LisMessageQueueSummaryRead)
+def lis_message_queue_summary(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+) -> LisMessageQueueSummaryRead:
+    filters = [LisIntegrationMessage.organization_id == context.organization_id]
+    if not context.is_organization_scoped:
+        filters.append(LisIntegrationMessage.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
+    counts = dict(
+        db.execute(
+            select(
+                LisIntegrationMessage.delivery_state,
+                func.count(LisIntegrationMessage.id),
+            )
+            .where(*filters)
+            .group_by(LisIntegrationMessage.delivery_state)
+        ).all()
+    )
+    now = datetime.now(UTC)
+    def age_seconds(value: datetime | None) -> int | None:
+        if value is None:
+            return None
+        base = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return int((now - base).total_seconds())
+
+    oldest_pending = db.scalar(
+        select(func.min(LisIntegrationMessage.created_at)).where(
+            *filters, LisIntegrationMessage.delivery_state == "pending"
+        )
+    )
+    oldest_failed = db.scalar(
+        select(func.min(LisIntegrationMessage.created_at)).where(
+            *filters, LisIntegrationMessage.delivery_state == "failed"
+        )
+    )
+    return LisMessageQueueSummaryRead(
+        pending=int(counts.get("pending", 0)),
+        failed=int(counts.get("failed", 0)),
+        sent=int(counts.get("sent", 0)),
+        oldest_pending_age_seconds=age_seconds(oldest_pending),
+        oldest_failed_age_seconds=age_seconds(oldest_failed),
+    )
+
+
+@router.get("/lis-messages", response_model=Page[LisIntegrationMessageRead])
+def list_lis_messages(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    delivery_state: Annotated[str | None, Query(max_length=20)] = None,
+    event_category: Annotated[str | None, Query(max_length=30)] = None,
+    older_than_minutes: Annotated[int | None, Query(ge=0, le=60 * 24 * 30)] = None,
+) -> Page[LisIntegrationMessageRead]:
+    filters = [LisIntegrationMessage.organization_id == context.organization_id]
+    if not context.is_organization_scoped:
+        filters.append(LisIntegrationMessage.branch_id.in_(context.branch_ids or {uuid.uuid4()}))
+    if delivery_state:
+        filters.append(LisIntegrationMessage.delivery_state == delivery_state.strip().lower())
+    if event_category:
+        filters.append(LisIntegrationMessage.event_category == event_category.strip().lower())
+    if older_than_minutes is not None:
+        cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
+        filters.append(LisIntegrationMessage.created_at <= cutoff)
+    rows = db.execute(
+        select(
+            LisIntegrationMessage,
+            func.count(LisIntegrationMessage.id).over().label("total_count"),
+        )
+        .where(*filters)
+        .order_by(LisIntegrationMessage.created_at.desc(), LisIntegrationMessage.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    total = rows[0].total_count if rows else 0
+    if not rows and offset:
+        total = db.scalar(select(func.count(LisIntegrationMessage.id)).where(*filters)) or 0
+    return Page[LisIntegrationMessageRead](
+        items=[lis_integration_message_read(row) for row, _ in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def enqueue_analyzer_worklist_for_specimen(
