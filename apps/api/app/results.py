@@ -73,9 +73,7 @@ def _derive_flag_from_analyzer_flags(analyzer_flags: str | None) -> str | None:
     if not analyzer_flags:
         return None
     tokens = [
-        token.strip()
-        for token in analyzer_flags.replace("\\", "~").split("~")
-        if token.strip()
+        token.strip() for token in analyzer_flags.replace("\\", "~").split("~") if token.strip()
     ]
     upper_tokens = [token.upper() for token in tokens]
     if "NR" in upper_tokens:

@@ -10,7 +10,14 @@ import socket
 import re
 from dataclasses import dataclass
 
-from app.hl7_law import SEGMENT_SEP, escape_hl7, hl7_timestamp, parse_ack, read_mllp_messages, wrap_mllp
+from app.hl7_law import (
+    SEGMENT_SEP,
+    escape_hl7,
+    hl7_timestamp,
+    parse_ack,
+    read_mllp_messages,
+    wrap_mllp,
+)
 
 
 @dataclass(frozen=True)

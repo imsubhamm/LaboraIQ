@@ -2787,6 +2787,7 @@ def lis_message_queue_summary(
         ).all()
     )
     now = datetime.now(UTC)
+
     def age_seconds(value: datetime | None) -> int | None:
         if value is None:
             return None
