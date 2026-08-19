@@ -941,7 +941,12 @@ def test_phase3_lis_status_storage_and_routing_support(
         == 200
     )
     assert client.post(f"/api/v1/specimens/{barcode}/receive").status_code == 200
-    assert client.post(f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"}).status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/specimens/{barcode}/decision", json={"decision": "accept"}
+        ).status_code
+        == 200
+    )
 
     plan = client.get(f"/api/v1/specimens/{barcode}/lis-routing-plan")
     assert plan.status_code == 200
@@ -963,7 +968,12 @@ def test_phase3_lis_status_storage_and_routing_support(
 
     storage_messages = client.post(
         f"/api/v1/specimens/{barcode}/lis-storage",
-        json={"module_id": "90", "rack_id": "RACK-07", "position": "12", "carrier_type": "ESFlex80pos"},
+        json={
+            "module_id": "90",
+            "rack_id": "RACK-07",
+            "position": "12",
+            "carrier_type": "ESFlex80pos",
+        },
     )
     assert storage_messages.status_code == 200
     assert len(storage_messages.json()) == 2
@@ -1612,7 +1622,14 @@ def test_result_helpers_normalize_no_result_and_analyzer_flags() -> None:
     assert normalize_unit("mg/dl") == "mg/dL"
     assert normalize_unit("  ng/ml  ") == "ng/mL"
     assert normalize_unit("mmol/L") == "mmol/L"
-    assert compute_flag("No Result", reference_low=None, reference_high=None, analyzer_flags="NR") == "NR"
+    assert (
+        compute_flag("No Result", reference_low=None, reference_high=None, analyzer_flags="NR")
+        == "NR"
+    )
     assert compute_flag("<15", reference_low=None, reference_high=None, analyzer_flags="ef5") == "L"
-    assert compute_flag(">625", reference_low=None, reference_high=None, analyzer_flags="ef4") == "H"
-    assert compute_flag("999", reference_low=None, reference_high=None, analyzer_flags="LL~HH") == "HH"
+    assert (
+        compute_flag(">625", reference_low=None, reference_high=None, analyzer_flags="ef4") == "H"
+    )
+    assert (
+        compute_flag("999", reference_low=None, reference_high=None, analyzer_flags="LL~HH") == "HH"
+    )
