@@ -63,7 +63,9 @@ class ApiClient:
     def get(self, path: str, *, params: dict[str, str | int] | None = None):
         return self._request("GET", path, params=params)
 
-    def post(self, path: str, *, body: dict | None = None, params: dict[str, str | int] | None = None):
+    def post(
+        self, path: str, *, body: dict | None = None, params: dict[str, str | int] | None = None
+    ):
         return self._request("POST", path, params=params, body=body)
 
     def get_bytes(self, path: str):
@@ -153,7 +155,10 @@ def main() -> int:
         flush=True,
     )
     print(client.post(f"/specimens/{barcode}/receive")["status"], flush=True)
-    print(client.post(f"/specimens/{barcode}/decision", body={"decision": "accept"})["status"], flush=True)
+    print(
+        client.post(f"/specimens/{barcode}/decision", body={"decision": "accept"})["status"],
+        flush=True,
+    )
 
     print("\n== Analyzer queue ==", flush=True)
     worklist = client.get("/analyzer-worklist", params={"status": "pending", "limit": 100})
