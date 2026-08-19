@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Plus, Search, X } from "lucide-react";
 import { api, ApiRecord, Page } from "@/lib/api";
 import type { Permission } from "@/lib/auth";
@@ -26,27 +26,64 @@ export function ResourcePage({
   const [open, setOpen] = useState(false);
   const [formError, setFormError] = useState("");
   const [fieldOptions, setFieldOptions] = useState<Record<string, ApiRecord[]>>({});
+  const lookupsLoaded = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async function load() {
+  const load = useCallback(async function load(options?: { soft?: boolean }) {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      setLoading(true);
-      const lookupFields = fields.filter(field => field.lookup);
-      const [result, ...lookups] = await Promise.all([
-        api<Page<ApiRecord>>(`/${endpoint}?limit=25&offset=0`),
-        ...lookupFields.map(field => api<Page<ApiRecord>>(`/${field.lookup!.endpoint}?limit=100&offset=0`))
-      ]);
+      if (!options?.soft) setLoading(true);
+      const result = await api<Page<ApiRecord>>(`/${endpoint}?limit=25&offset=0`, {
+        signal: controller.signal
+      });
+      if (controller.signal.aborted) return;
       setRecords(result.items);
       setTotal(result.total);
-      setFieldOptions(Object.fromEntries(lookupFields.map((field,index)=>[field.name,lookups[index].items])));
       setError("");
     } catch (err) {
+      if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : "Unable to load records");
-    } finally { setLoading(false); }
-  }, [endpoint, fields]);
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  }, [endpoint]);
+
+  const loadLookups = useCallback(async function loadLookups() {
+    if (lookupsLoaded.current) return;
+    const lookupFields = fields.filter(field => field.lookup);
+    if (lookupFields.length === 0) {
+      lookupsLoaded.current = true;
+      return;
+    }
+    try {
+      const lookups = await Promise.all(
+        lookupFields.map(field =>
+          api<Page<ApiRecord>>(`/${field.lookup!.endpoint}?limit=100&offset=0`)
+        )
+      );
+      setFieldOptions(
+        Object.fromEntries(lookupFields.map((field, index) => [field.name, lookups[index].items]))
+      );
+      lookupsLoaded.current = true;
+    } catch {
+      // Form can still open; options may be empty until retry.
+    }
+  }, [fields]);
+
   useEffect(() => {
     const task = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(task);
+    return () => {
+      window.clearTimeout(task);
+      abortRef.current?.abort();
+    };
   }, [load]);
+
+  async function openCreate() {
+    setOpen(true);
+    await loadLookups();
+  }
 
   async function submit(formData: FormData) {
     const payload = Object.fromEntries(formData.entries());
@@ -54,7 +91,7 @@ export function ResourcePage({
       await api(`/${endpoint}`, { method: "POST", body: JSON.stringify(payload) });
       setFormError("");
       setOpen(false);
-      await load();
+      await load({ soft: true });
     } catch (err) { setFormError(err instanceof Error ? err.message : "Unable to save"); }
   }
 
@@ -73,15 +110,15 @@ export function ResourcePage({
       <div className="page-heading">
         <div><p className="eyebrow">PLATFORM FOUNDATION</p><h1>{title}</h1><p>{description}</p></div>
         {fields.length > 0 && (!managePermission || can(managePermission)) &&
-          <button className="primary" onClick={() => setOpen(true)}><Plus size={17}/> Add {title.replace(/s$/, "")}</button>}
+          <button className="primary" onClick={() => void openCreate()}><Plus size={17}/> Add {title.replace(/s$/, "")}</button>}
       </div>
       <div className="panel">
         <div className="toolbar">
           <label className="search"><Search size={17}/><input aria-label={`Filter ${title}`} placeholder={`Filter ${title.toLowerCase()}…`} value={filter} onChange={e => setFilter(e.target.value)}/></label>
           <span>{total} records</span>
         </div>
-        {error && <div className="error-state"><AlertCircle size={18}/>{error}<button onClick={load}>Retry</button></div>}
-        {loading ? <div className="loading" aria-label="Loading"><i/><i/><i/></div> :
+        {error && <div className="error-state"><AlertCircle size={18}/>{error}<button onClick={() => void load()}>Retry</button></div>}
+        {loading && records.length === 0 ? <div className="loading" aria-label="Loading"><i/><i/><i/></div> :
           filtered.length === 0 ? <div className="empty-state"><span>0</span><h3>No records found</h3><p>{emptyMessage}</p></div> :
           <div className="table-wrap"><table><thead><tr>{columns.map(c => <th key={c.key}>{c.label}</th>)}</tr></thead>
           <tbody>{filtered.map((record, index) => <tr key={String(record.id ?? index)}>{columns.map(c =>

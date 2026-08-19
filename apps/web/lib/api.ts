@@ -41,11 +41,26 @@ function authHeaders(): HeadersInit {
     return headers;
   }
   // Local/dev fallback only when the browser has no session JWT yet.
-  if (process.env.NEXT_PUBLIC_DEV_AUTH_HEADER === "true") {
+  if (
+    process.env.NODE_ENV === "development" &&
+    process.env.NEXT_PUBLIC_DEV_AUTH_HEADER === "true"
+  ) {
     headers["X-Dev-User-Email"] =
       process.env.NEXT_PUBLIC_DEV_AUTH_EMAIL?.trim() || "admin@dev.labora.local";
   }
   return headers;
+}
+
+async function clearSessionAndRedirect(): Promise<void> {
+  clearBrowserAccessToken();
+  try {
+    await fetch("/auth/logout", { method: "POST" });
+  } catch {
+    // Best-effort cookie clear; still bounce to login.
+  }
+  if (typeof window !== "undefined") {
+    window.location.assign("/login?reason=expired");
+  }
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -60,14 +75,17 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store"
   });
   if (response.status === 401 && typeof window !== "undefined") {
-    clearBrowserAccessToken();
-    window.location.assign("/login?reason=expired");
+    await clearSessionAndRedirect();
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: "Request failed" }));
     throw new ApiError(response.status, errorMessage(body.detail));
   }
   if (response.status === 204) return undefined as T;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return undefined as T;
+  }
   return response.json() as Promise<T>;
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, FlaskConical, PackageCheck, ScanBarcode, Search, X } from "lucide-react";
 import { api, Page } from "@/lib/api";
 import { can } from "@/lib/auth";
@@ -27,25 +27,36 @@ export default function SpecimensPage() {
   const [selected,setSelected] = useState<Specimen|null>(null);
   const [action,setAction] = useState<Action>(null);
   const [saving,setSaving] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: { soft?: boolean }) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      setLoading(true);
+      if (!options?.soft) setLoading(true);
       const query = new URLSearchParams({limit:"50",offset:"0"});
       if(search.trim()) query.set("search",search.trim());
       if(status) query.set("status",status);
-      const result = await api<Page<Specimen>>(`/specimens?${query}`);
+      const result = await api<Page<Specimen>>(`/specimens?${query}`, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setRecords(result.items); setTotal(result.total); setError("");
-    } catch(reason) { setError(reason instanceof Error ? reason.message : "Unable to load specimens"); }
-    finally { setLoading(false); }
+    } catch(reason) {
+      if (controller.signal.aborted) return;
+      setError(reason instanceof Error ? reason.message : "Unable to load specimens");
+    }
+    finally { if (!controller.signal.aborted) setLoading(false); }
   },[search,status]);
-  useEffect(()=>{ const timer=window.setTimeout(()=>void load(),200); return()=>window.clearTimeout(timer); },[load]);
+  useEffect(()=>{
+    const timer=window.setTimeout(()=>void load(),200);
+    return()=>{ window.clearTimeout(timer); abortRef.current?.abort(); };
+  },[load]);
 
   async function transition(specimen:Specimen, endpoint:string, body?:object) {
     try {
       setSaving(true); setError("");
       await api(`/specimens/${encodeURIComponent(specimen.barcode)}/${endpoint}`,{method:"POST",body:body ? JSON.stringify(body) : undefined});
-      setSelected(null); setAction(null); await load();
+      setSelected(null); setAction(null); await load({ soft: true });
     } catch(reason) { setError(reason instanceof Error ? reason.message : "Unable to update specimen"); }
     finally { setSaving(false); }
   }
@@ -71,7 +82,7 @@ export default function SpecimensPage() {
         <label className="search"><Search size={17}/><input aria-label="Scan or search specimens" autoFocus placeholder="Scan barcode, accession, patient, or order…" value={search} onChange={event=>setSearch(event.target.value)}/></label>
         <select aria-label="Filter specimen status" value={status} onChange={event=>setStatus(event.target.value)}>{statuses.map(value=><option value={value} key={value}>{value?value.replaceAll("_"," "):"All statuses"}</option>)}</select>
       </div>
-      {loading?<div className="loading"><i/><i/><i/></div>:records.length===0?<div className="empty-state"><span>0</span><h3>No specimens found</h3><p>Generate a barcode after payment or change the filters.</p></div>:
+      {loading&&records.length===0?<div className="loading"><i/><i/><i/></div>:records.length===0?<div className="empty-state"><span>0</span><h3>No specimens found</h3><p>Generate a barcode after payment or change the filters.</p></div>:
       <div className="table-wrap"><table className="specimen-table"><thead><tr><th>Barcode</th><th>Patient & order</th><th>Specimen</th><th>Department</th><th>Status</th><th>Action</th></tr></thead><tbody>
         {records.map(item=><tr key={item.id}><td><strong>{item.barcode}</strong><span>{item.accession_number||"Not accessioned"}</span></td><td><strong>{item.patient_name}</strong><span>{item.patient_number} · {item.order_number}</span></td><td><strong>{item.specimen_type}</strong><span>{item.container_type} · {item.container_count} container(s)</span></td><td>{item.laboratory_department||"Unassigned"}</td><td><span className={`workflow-status ${item.status}`}>{item.status.replaceAll("_"," ")}</span>{item.rejection_reason&&<small>{item.rejection_reason}</small>}</td><td><div className="row-actions">{can("branch.manage")&&item.status==="awaiting_collection"&&<button onClick={()=>open(item,"collect")}>Collect</button>}{can("branch.manage")&&item.status==="collected"&&<button onClick={()=>void transition(item,"receive")}>Receive</button>}{can("branch.manage")&&item.status==="received"&&<><button className="accept" onClick={()=>void transition(item,"decision",{decision:"accept"})}>Accept</button><button className="reject" onClick={()=>open(item,"reject")}>Reject</button></>}</div></td></tr>)}
       </tbody></table></div>}
