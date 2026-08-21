@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, ListChecks, Search } from "lucide-react";
+import { AlertCircle, ListChecks, Search, X } from "lucide-react";
 import { api, Page } from "@/lib/api";
 import { can } from "@/lib/auth";
 
@@ -21,10 +21,32 @@ type WorklistItem = {
   created_at: string;
 };
 
+type AnalyzerMessage = {
+  id: string;
+  direction: string;
+  content_type: string;
+  body: string;
+  correlation_id: string;
+  created_at: string;
+};
+
 type ProcessResult = {
   processed: number;
   attempts: Array<{ id: string; attempt_no: number; state: string; error: string | null }>;
 };
+
+function formatHl7(body: string) {
+  return body.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function messageLabel(body: string, direction: string) {
+  const head = body.slice(0, 80);
+  if (head.includes("OML^O33") || head.includes("OML^O21")) return "Order (OML)";
+  if (head.includes("ORU^R01")) return "Result (ORU)";
+  if (head.includes("ACK")) return "Acknowledgement (ACK)";
+  if (body.startsWith("LABORAIQ-ORDER-V0")) return "Stub order";
+  return direction === "outbound" ? "Outbound message" : "Inbound message";
+}
 
 export default function AnalyzerWorklistPage() {
   const [items, setItems] = useState<WorklistItem[]>([]);
@@ -35,6 +57,11 @@ export default function AnalyzerWorklistPage() {
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
   const [processSummary, setProcessSummary] = useState("");
+  const [messageItem, setMessageItem] = useState<WorklistItem | null>(null);
+  const [messages, setMessages] = useState<AnalyzerMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState("");
+  const [selectedMessageId, setSelectedMessageId] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -56,6 +83,23 @@ export default function AnalyzerWorklistPage() {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
   }, [load]);
+
+  async function openMessages(item: WorklistItem) {
+    setMessageItem(item);
+    setMessages([]);
+    setSelectedMessageId("");
+    setMessagesError("");
+    setMessagesLoading(true);
+    try {
+      const rows = await api<AnalyzerMessage[]>(`/analyzer-worklist/${item.id}/messages`);
+      setMessages(rows);
+      setSelectedMessageId(rows[0]?.id ?? "");
+    } catch (reason) {
+      setMessagesError(reason instanceof Error ? reason.message : "Unable to load messages");
+    } finally {
+      setMessagesLoading(false);
+    }
+  }
 
   async function enqueue(id: string) {
     try {
@@ -121,6 +165,8 @@ export default function AnalyzerWorklistPage() {
       setProcessing(false);
     }
   }
+
+  const selectedMessage = messages.find((row) => row.id === selectedMessageId) ?? null;
 
   return (
     <section>
@@ -239,15 +285,21 @@ export default function AnalyzerWorklistPage() {
                     <td>{new Date(item.created_at).toLocaleString()}</td>
                     <td>
                       <div className="analyzer-actions">
+                        <button
+                          className="mapping-button"
+                          onClick={() => void openMessages(item)}
+                        >
+                          Messages
+                        </button>
                         {can("result.review") && item.status === "result_received" && (
-                            <button
-                              className="mapping-button"
-                              disabled={busyId === item.id}
-                              onClick={() => void normalize(item.id)}
-                            >
-                              Normalize
-                            </button>
-                          )}
+                          <button
+                            className="mapping-button"
+                            disabled={busyId === item.id}
+                            onClick={() => void normalize(item.id)}
+                          >
+                            Normalize
+                          </button>
+                        )}
                         {can("analyzer.manage") &&
                           (item.status === "pending" || item.status === "failed") && (
                             <button
@@ -278,6 +330,90 @@ export default function AnalyzerWorklistPage() {
           </div>
         )}
       </div>
+
+      {messageItem && (
+        <div className="modal-backdrop">
+          <section className="modal message-modal">
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">ANALYZER EXCHANGE</p>
+                <h2>{messageItem.specimen_barcode}</h2>
+                <small>
+                  {messageItem.analyzer_code} · {messageItem.lis_test_code} →{" "}
+                  {messageItem.machine_test_code}
+                </small>
+              </div>
+              <button
+                aria-label="Close message viewer"
+                onClick={() => {
+                  setMessageItem(null);
+                  setMessages([]);
+                  setSelectedMessageId("");
+                  setMessagesError("");
+                }}
+              >
+                <X />
+              </button>
+            </div>
+            {messagesError && (
+              <div className="connection-error">
+                <AlertCircle size={16} />
+                <span>
+                  <strong>Unable to load messages</strong>
+                  {messagesError}
+                </span>
+              </div>
+            )}
+            {messagesLoading ? (
+              <div className="loading" style={{ padding: 28 }}>
+                <i />
+                <i />
+                <i />
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="empty-state" style={{ padding: 40 }}>
+                <ListChecks />
+                <h3>No messages yet</h3>
+                <p>Enqueue and process the order queue to send an OML to the analyzer.</p>
+              </div>
+            ) : (
+              <div className="message-layout">
+                <aside>
+                  <h3>Traffic</h3>
+                  {messages.map((row) => (
+                    <button
+                      key={row.id}
+                      className={selectedMessageId === row.id ? "active" : ""}
+                      onClick={() => setSelectedMessageId(row.id)}
+                    >
+                      <strong>{messageLabel(row.body, row.direction)}</strong>
+                      <span>
+                        {row.direction} · {new Date(row.created_at).toLocaleString()}
+                      </span>
+                    </button>
+                  ))}
+                </aside>
+                <div className="message-detail">
+                  {selectedMessage ? (
+                    <>
+                      <div className="message-meta">
+                        <span className={`status ${selectedMessage.direction}`}>
+                          {selectedMessage.direction}
+                        </span>
+                        <small>{selectedMessage.content_type}</small>
+                        <small>{selectedMessage.correlation_id}</small>
+                      </div>
+                      <pre>{formatHl7(selectedMessage.body)}</pre>
+                    </>
+                  ) : (
+                    <p>Select a message to inspect the HL7 payload.</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </section>
   );
 }

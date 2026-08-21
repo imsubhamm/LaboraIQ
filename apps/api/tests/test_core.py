@@ -1460,6 +1460,11 @@ def test_hl7_law_order_requires_ack_and_stores_oru(
         assert any("OML^O33" in row.body for row in rows if row.direction == "outbound")
         assert any("MSA|AA|" in row.body for row in rows if row.direction == "inbound")
         assert any("ORU^R01" in row.body for row in rows if row.direction == "inbound")
+        listed = client.get(f"/api/v1/analyzer-worklist/{item_id}/messages")
+        assert listed.status_code == 200
+        payload = listed.json()
+        assert any(row["direction"] == "outbound" and "OML^O33" in row["body"] for row in payload)
+        assert any(row["direction"] == "inbound" and "ORU^R01" in row["body"] for row in payload)
         results = client.get("/api/v1/results", params={"status": "pending_review"})
         assert results.status_code == 200
         assert results.json()["total"] >= 1
