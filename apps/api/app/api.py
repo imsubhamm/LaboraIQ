@@ -40,6 +40,7 @@ from app.lis_events import (
 from app.models import (
     Analyzer,
     AnalyzerConnectionEvent,
+    AnalyzerMessage,
     AnalyzerOrderAttempt,
     AnalyzerParameterMapping,
     AnalyzerTestMapping,
@@ -83,6 +84,7 @@ from app.schemas import (
     AnalyzerConnectionTestRead,
     AnalyzerCreate,
     AnalyzerMappingStatusUpdate,
+    AnalyzerMessageRead,
     AnalyzerOrderAttemptRead,
     AnalyzerOrderProcessRead,
     AnalyzerRead,
@@ -3111,6 +3113,53 @@ def list_analyzer_worklist(
         total = db.scalar(select(func.count(AnalyzerWorklistItem.id)).where(*filters)) or 0
     items = worklist_item_reads(db, [item for item, _ in rows])
     return Page[AnalyzerWorklistRead](items=items, total=total, limit=limit, offset=offset)
+
+
+def analyzer_message_read(message: AnalyzerMessage) -> AnalyzerMessageRead:
+    return AnalyzerMessageRead(
+        id=message.id,
+        analyzer_id=message.analyzer_id,
+        worklist_item_id=message.worklist_item_id,
+        attempt_id=message.attempt_id,
+        direction=message.direction,
+        content_type=message.content_type,
+        body=message.body,
+        payload_hash=message.payload_hash,
+        correlation_id=message.correlation_id,
+        created_at=message.created_at,
+    )
+
+
+@router.get(
+    "/analyzer-worklist/{item_id}/messages",
+    response_model=list[AnalyzerMessageRead],
+)
+def list_analyzer_worklist_messages(
+    item_id: uuid.UUID,
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+) -> list[AnalyzerMessageRead]:
+    item = db.scalar(
+        select(AnalyzerWorklistItem).where(
+            AnalyzerWorklistItem.id == item_id,
+            AnalyzerWorklistItem.organization_id == context.organization_id,
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Worklist item not found")
+    if not context.can_access_branch(item.branch_id):
+        raise HTTPException(status_code=403, detail="Branch access denied")
+    rows = list(
+        db.scalars(
+            select(AnalyzerMessage)
+            .where(
+                AnalyzerMessage.organization_id == context.organization_id,
+                AnalyzerMessage.worklist_item_id == item_id,
+            )
+            .order_by(AnalyzerMessage.created_at.asc(), AnalyzerMessage.id.asc())
+        ).all()
+    )
+    return [analyzer_message_read(row) for row in rows]
 
 
 @router.post(

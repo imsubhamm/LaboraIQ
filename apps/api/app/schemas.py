@@ -387,6 +387,9 @@ class AnalyzerWorklistCancel(APIModel):
 
 class AnalyzerMessageRead(APIModel):
     id: uuid.UUID
+    analyzer_id: uuid.UUID
+    worklist_item_id: uuid.UUID | None
+    attempt_id: uuid.UUID | None
     direction: str
     content_type: str
     body: str
