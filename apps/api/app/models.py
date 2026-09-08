@@ -106,7 +106,15 @@ class Analyzer(Base, TimestampMixin):
 
 class AnalyzerConnectionEvent(Base):
     __tablename__ = "analyzer_connection_events"
-    __table_args__ = (Index("ix_analyzer_connection_events_recent", "analyzer_id", "occurred_at"),)
+    __table_args__ = (
+        Index("ix_analyzer_connection_events_recent", "analyzer_id", "occurred_at"),
+        Index(
+            "ix_ace_org_analyzer_occurred",
+            "organization_id",
+            "analyzer_id",
+            "occurred_at",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
     branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
@@ -332,6 +340,12 @@ class AnalyzerWorklistItem(Base, TimestampMixin):
             name="uq_worklist_specimen_analyzer_test",
         ),
         Index("ix_worklist_status_created", "organization_id", "status", "created_at"),
+        Index(
+            "ix_worklist_org_analyzer_created",
+            "organization_id",
+            "analyzer_id",
+            "created_at",
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
@@ -355,6 +369,12 @@ class AnalyzerMessage(Base):
     __tablename__ = "analyzer_messages"
     __table_args__ = (
         Index("ix_analyzer_messages_correlation", "organization_id", "correlation_id"),
+        Index(
+            "ix_analyzer_messages_org_analyzer_created",
+            "organization_id",
+            "analyzer_id",
+            "created_at",
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
@@ -376,6 +396,12 @@ class AnalyzerOrderAttempt(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_order_attempts_queue", "organization_id", "state", "created_at"),
         UniqueConstraint("worklist_item_id", "attempt_no", name="uq_worklist_attempt_no"),
+        Index(
+            "ix_order_attempts_org_analyzer_created",
+            "organization_id",
+            "analyzer_id",
+            "created_at",
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
@@ -405,6 +431,12 @@ class LabResult(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("worklist_item_id", name="uq_lab_result_worklist_item"),
         Index("ix_lab_results_status_created", "organization_id", "status", "created_at"),
+        Index(
+            "ix_lab_results_org_analyzer_created",
+            "organization_id",
+            "analyzer_id",
+            "created_at",
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)

@@ -689,3 +689,139 @@ class PaymentRead(PaymentSummary):
     transaction_id: str | None
     paid_at: datetime
     specimens: list[SpecimenRead]
+
+
+class AnalyzerHealthScoreRead(APIModel):
+    score: float
+    status: str
+    reasons: list[str]
+
+
+class AnalyzerDashboardSummaryRead(APIModel):
+    total_analyzers: int
+    online: int
+    degraded: int
+    offline: int
+    overall_uptime_percent: float | None
+    order_success_percent: float | None
+    result_success_percent: float | None
+    open_alerts: int
+
+
+class AnalyzerDashboardRowRead(APIModel):
+    analyzer_id: uuid.UUID
+    code: str
+    vendor: str
+    model: str
+    branch_id: uuid.UUID
+    branch_code: str
+    branch_name: str
+    time_zone: str
+    configuration_status: str
+    connectivity: str
+    health: AnalyzerHealthScoreRead
+    uptime_percent: float | None
+    orders: int
+    order_success_percent: float | None
+    result_success_percent: float | None
+    avg_latency_ms: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+    queue_depth: int
+    last_seen_at: datetime | None
+    last_successful_connection_at: datetime | None
+    failed_orders: int
+    retry_rate: float | None
+    current_error: str | None
+    timeout_rate: float | None
+    avg_order_duration_seconds: float | None
+    avg_result_turnaround_seconds: float | None
+    work_items: int
+    completed_items: int
+    pending_items: int
+    failed_items: int
+    cancelled_items: int
+    results_received: int
+    technically_reviewed: int
+    validated: int
+    released: int
+    tests_per_hour: float | None
+    inbound_messages: int
+    outbound_messages: int
+
+
+class AnalyzerTrendPointRead(APIModel):
+    bucket: datetime
+    label: str
+    availability_percent: float | None
+    failure_rate: float | None
+    avg_latency_ms: float | None
+    throughput: float | None
+    queue_depth: float | None
+
+
+class AnalyzerAlertRead(APIModel):
+    analyzer_id: uuid.UUID
+    analyzer_code: str
+    type: str
+    severity: str
+    message: str
+
+
+class AnalyzerHealthEventRead(APIModel):
+    occurred_at: datetime
+    event_type: str
+    success: bool
+    latency_ms: int | None
+    message: str
+
+
+class AnalyzerHealthAttemptRead(APIModel):
+    created_at: datetime
+    attempt_no: int
+    state: str
+    error: str | None
+
+
+class AnalyzerDashboardDetailRead(APIModel):
+    analyzer_id: uuid.UUID
+    connectivity: str
+    health: AnalyzerHealthScoreRead
+    last_heartbeat_at: datetime | None
+    last_successful_connection_at: datetime | None
+    current_latency_ms: int | None
+    queue_depth: int
+    current_error: str | None
+    uptime_seconds: float
+    downtime_seconds: float
+    connection_failures: int
+    failed_orders: int
+    retry_rate: float | None
+    timeout_rate: float | None
+    avg_latency_ms: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+    avg_order_duration_seconds: float | None
+    avg_result_turnaround_seconds: float | None
+    orders_received: int
+    completed_orders: int
+    results_received: int
+    tests_processed: int
+    tests_per_hour: float | None
+    inbound_messages: int
+    outbound_messages: int
+    ack_messages: int
+    connection_events: list[AnalyzerHealthEventRead]
+    failed_attempts: list[AnalyzerHealthAttemptRead]
+    hourly_trends: list[AnalyzerTrendPointRead]
+
+
+class AnalyzerDashboardRead(APIModel):
+    window_start: datetime
+    window_end: datetime
+    summary: AnalyzerDashboardSummaryRead
+    analyzers: list[AnalyzerDashboardRowRead]
+    trends: list[AnalyzerTrendPointRead]
+    alerts: list[AnalyzerAlertRead]
+    detail: AnalyzerDashboardDetailRead | None = None
+    query_batches: int

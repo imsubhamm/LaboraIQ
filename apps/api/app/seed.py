@@ -15,6 +15,7 @@ from app.models import (
     User,
     UserRoleAssignment,
 )
+from app.seed_analyzer_health import seed_demo_if_ready
 
 PERMISSIONS = {
     "organization.read": "View organization configuration",
@@ -249,6 +250,7 @@ def seed() -> None:
                     assignment_reason="Development environment bootstrap",
                 )
             )
+        seed_demo_if_ready(db)
         db.commit()
 
 

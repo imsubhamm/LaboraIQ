@@ -24,6 +24,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.analyzer_health import get_analyzer_dashboard
 from app.analyzer_orders import create_queued_attempt, process_queued_orders
 from app.audit import record_event
 from app.auth import Auth, AuthContext, load_context_for_identity, require_permission
@@ -83,6 +84,7 @@ from app.schemas import (
     AnalyzerConnectionEventRead,
     AnalyzerConnectionTestRead,
     AnalyzerCreate,
+    AnalyzerDashboardRead,
     AnalyzerMappingStatusUpdate,
     AnalyzerMessageRead,
     AnalyzerOrderAttemptRead,
@@ -333,6 +335,29 @@ def list_analyzers(
             raise HTTPException(status_code=403, detail="Branch access denied")
         statement = statement.where(Analyzer.branch_id == branch_id)
     return page(db, statement.order_by(Analyzer.code, Analyzer.id), AnalyzerRead, limit, offset)
+
+
+@router.get("/analyzer-dashboard", response_model=AnalyzerDashboardRead)
+def analyzer_dashboard(
+    db: Db,
+    context: Annotated[AuthContext, Depends(require_permission("analyzer.read"))],
+    branch_id: uuid.UUID | None = None,
+    analyzer_id: uuid.UUID | None = None,
+    vendor: Annotated[str | None, Query(max_length=120)] = None,
+    model: Annotated[str | None, Query(max_length=120)] = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> AnalyzerDashboardRead:
+    return get_analyzer_dashboard(
+        db,
+        context,
+        branch_id=branch_id,
+        analyzer_id=analyzer_id,
+        vendor=vendor,
+        model=model,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 @router.post("/analyzers", response_model=AnalyzerRead, status_code=201)

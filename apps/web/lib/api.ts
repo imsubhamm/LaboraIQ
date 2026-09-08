@@ -8,7 +8,26 @@ export type Page<T> = { items: T[]; total: number; limit: number; offset: number
 export type RecordValue = string | number | boolean | null | undefined;
 export type ApiRecord = Record<string, RecordValue>;
 
-const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
+const configuredBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
+
+function apiRoot(): string {
+  if (typeof window === "undefined" || configuredBaseUrl.startsWith("/")) {
+    return configuredBaseUrl;
+  }
+  try {
+    const api = new URL(configuredBaseUrl);
+    const pageHost = window.location.hostname;
+    if (
+      (api.hostname === "localhost" || api.hostname === "127.0.0.1") &&
+      (pageHost === "localhost" || pageHost === "127.0.0.1")
+    ) {
+      api.hostname = pageHost;
+    }
+    return api.toString().replace(/\/$/, "");
+  } catch {
+    return configuredBaseUrl;
+  }
+}
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -50,7 +69,7 @@ function authHeaders(): HeadersInit {
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(`${apiRoot()}${path}`, {
     ...init,
     headers: {
       ...(!isFormData ? { "Content-Type": "application/json" } : {}),
