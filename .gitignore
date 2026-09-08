@@ -1,4 +1,6 @@
 .env
+.env.local
+apps/web/.env.local
 .DS_Store
 __pycache__/
 *.py[cod]
