@@ -61,6 +61,8 @@ def context(db: Session) -> AuthContext:
                 "result.review",
                 "result.validate",
                 "result.release",
+                "quality_audit.read",
+                "quality_audit.manage",
             }
         ),
         is_organization_scoped=True,

@@ -585,3 +585,223 @@ class Specimen(Base, TimestampMixin):
     rejection_reason: Mapped[str | None] = mapped_column(String(120))
     rejection_notes: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="awaiting_collection")
+
+
+class AuditStandard(Base, TimestampMixin):
+    """Configurable accreditation/standard catalogue (e.g. synthetic NABL placeholder)."""
+
+    __tablename__ = "audit_standards"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code", "version", name="uq_audit_standard"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    code: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(200))
+    version: Mapped[str] = mapped_column(String(40))
+    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="active")
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditClause(Base, TimestampMixin):
+    __tablename__ = "audit_clauses"
+    __table_args__ = (
+        UniqueConstraint("standard_id", "clause_code", name="uq_audit_clause_code"),
+        Index("ix_audit_clause_standard_seq", "standard_id", "sequence"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    standard_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audit_standards.id"), index=True)
+    parent_clause_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_clauses.id"))
+    clause_code: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditChecklist(Base, TimestampMixin):
+    __tablename__ = "audit_checklists"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", "version", name="uq_audit_checklist"),
+        Index("ix_audit_checklist_org_type", "organization_id", "audit_type"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    audit_type: Mapped[str] = mapped_column(String(20))  # NABL | INTERNAL
+    version: Mapped[str] = mapped_column(String(40), default="1")
+    status: Mapped[str] = mapped_column(String(30), default="active")
+    description: Mapped[str | None] = mapped_column(Text)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditChecklistItem(Base, TimestampMixin):
+    __tablename__ = "audit_checklist_items"
+    __table_args__ = (Index("ix_checklist_item_checklist_seq", "checklist_id", "sequence"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    checklist_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audit_checklists.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    section: Mapped[str | None] = mapped_column(String(120))
+    requirement: Mapped[str] = mapped_column(Text)
+    question: Mapped[str] = mapped_column(Text)
+    expected_evidence: Mapped[str | None] = mapped_column(Text)
+    severity_if_failed: Mapped[str] = mapped_column(String(20), default="MINOR")
+    applicable_department: Mapped[str | None] = mapped_column(String(120))
+    clause_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_clauses.id"))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class QualityAudit(Base, TimestampMixin):
+    """One quality/accreditation engagement (NABL or internal LAB)."""
+
+    __tablename__ = "audits"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "audit_number", name="uq_audit_number"),
+        Index("ix_audits_org_type_status", "organization_id", "audit_type", "status"),
+        Index("ix_audits_org_branch_planned", "organization_id", "branch_id", "planned_start_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("departments.id"), index=True
+    )
+    checklist_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_checklists.id"))
+    standard_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_standards.id"))
+    audit_number: Mapped[str] = mapped_column(String(40))
+    audit_type: Mapped[str] = mapped_column(String(20))  # NABL | INTERNAL
+    lab_audit_subtype: Mapped[str | None] = mapped_column(String(60))
+    title: Mapped[str] = mapped_column(String(200))
+    scope: Mapped[str | None] = mapped_column(Text)
+    process_name: Mapped[str | None] = mapped_column(String(120))
+    auditor_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    audit_owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    planned_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(40), default="DRAFT")
+    description: Mapped[str | None] = mapped_column(Text)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditCheckResult(Base, TimestampMixin):
+    __tablename__ = "audit_check_results"
+    __table_args__ = (
+        UniqueConstraint("audit_id", "checklist_item_id", name="uq_audit_check_item"),
+        Index("ix_check_results_audit", "organization_id", "audit_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    audit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audits.id"), index=True)
+    checklist_item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audit_checklist_items.id"))
+    result: Mapped[str] = mapped_column(
+        String(30)
+    )  # COMPLIANT | PARTIAL | NON_COMPLIANT | NOT_APPLICABLE
+    score: Mapped[int | None] = mapped_column(Integer)
+    observation: Mapped[str | None] = mapped_column(Text)
+    evidence_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    evidence_provided: Mapped[bool] = mapped_column(Boolean, default=False)
+    evaluated_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuditFinding(Base, TimestampMixin):
+    __tablename__ = "audit_findings"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "finding_number", name="uq_finding_number"),
+        Index("ix_findings_org_audit_status", "organization_id", "audit_id", "status"),
+        Index("ix_findings_org_severity", "organization_id", "severity", "status"),
+        Index("ix_findings_due", "organization_id", "due_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    branch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("branches.id"), index=True)
+    audit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audits.id"), index=True)
+    checklist_result_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("audit_check_results.id")
+    )
+    department_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("departments.id"))
+    standard_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_standards.id"))
+    clause_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_clauses.id"))
+    analyzer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("analyzers.id"))
+    specimen_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("specimens.id"))
+    lab_result_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("lab_results.id"))
+    worklist_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("analyzer_worklist_items.id")
+    )
+    referenced_entity_type: Mapped[str | None] = mapped_column(String(80))
+    referenced_entity_id: Mapped[str | None] = mapped_column(String(100))
+    finding_number: Mapped[str] = mapped_column(String(40))
+    finding_type: Mapped[str] = mapped_column(String(40))
+    severity: Mapped[str] = mapped_column(String(20))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    requirement: Mapped[str | None] = mapped_column(Text)
+    root_cause: Mapped[str | None] = mapped_column(Text)
+    correction: Mapped[str | None] = mapped_column(Text)
+    corrective_action_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    preventive_action_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(40), default="OPEN")
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    process_name: Mapped[str | None] = mapped_column(String(120))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditCapa(Base, TimestampMixin):
+    __tablename__ = "audit_capas"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "capa_number", name="uq_capa_number"),
+        Index("ix_capa_org_status_due", "organization_id", "status", "due_at"),
+        Index("ix_capa_finding", "finding_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    finding_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("audit_findings.id"), index=True)
+    capa_number: Mapped[str] = mapped_column(String(40))
+    root_cause: Mapped[str | None] = mapped_column(Text)
+    immediate_correction: Mapped[str | None] = mapped_column(Text)
+    corrective_action: Mapped[str | None] = mapped_column(Text)
+    preventive_action: Mapped[str | None] = mapped_column(Text)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    priority: Mapped[str] = mapped_column(String(20), default="MEDIUM")
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(40), default="OPEN")
+    effectiveness_check_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    effectiveness_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    effectiveness_notes: Mapped[str | None] = mapped_column(Text)
+    verified_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditEvidence(Base, TimestampMixin):
+    __tablename__ = "audit_evidence"
+    __table_args__ = (
+        Index("ix_evidence_org_audit", "organization_id", "audit_id"),
+        Index("ix_evidence_finding", "finding_id"),
+        Index("ix_evidence_capa", "capa_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), index=True)
+    audit_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audits.id"))
+    finding_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_findings.id"))
+    capa_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("audit_capas.id"))
+    document_reference: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str | None] = mapped_column(Text)
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    version: Mapped[str] = mapped_column(String(20), default="1")
+    verification_status: Mapped[str] = mapped_column(String(30), default="PENDING")
+    verified_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -57,6 +57,8 @@ export const config = {
     "/specimens/:path*",
     "/test-master/:path*",
     "/analyzers/:path*",
-    "/results/:path*"
+    "/results/:path*",
+    "/nabl-audit-report/:path*",
+    "/lab-audit-report/:path*"
   ]
 };

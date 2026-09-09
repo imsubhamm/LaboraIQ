@@ -11,6 +11,7 @@ from app.api import router
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.models import AuditEvent, User
+from app.quality_audit_routes import router as quality_audit_router
 
 settings = get_settings()
 logging.basicConfig(
@@ -82,3 +83,4 @@ async def request_context(
 
 
 app.include_router(router, prefix="/api/v1")
+app.include_router(quality_audit_router, prefix="/api/v1")
