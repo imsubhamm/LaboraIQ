@@ -206,6 +206,8 @@ class UserUpdate(APIModel):
 
 
 class UserRead(UserCreate):
+    # Dev identities use reserved TLDs like .local; EmailStr rejects those on read.
+    email: str
     id: uuid.UUID
     organization_id: uuid.UUID
     status: Status
@@ -824,4 +826,368 @@ class AnalyzerDashboardRead(APIModel):
     trends: list[AnalyzerTrendPointRead]
     alerts: list[AnalyzerAlertRead]
     detail: AnalyzerDashboardDetailRead | None = None
+    query_batches: int
+
+
+# --- Quality audit (NABL + INTERNAL) ---
+
+
+class QualityAuditCreate(APIModel):
+    branch_id: uuid.UUID
+    audit_type: str = Field(pattern="^(NABL|INTERNAL)$")
+    title: str = Field(min_length=2, max_length=200)
+    audit_number: str | None = Field(default=None, max_length=40)
+    lab_audit_subtype: str | None = Field(default=None, max_length=60)
+    scope: str | None = None
+    process_name: str | None = Field(default=None, max_length=120)
+    department_id: uuid.UUID | None = None
+    checklist_id: uuid.UUID | None = None
+    standard_id: uuid.UUID | None = None
+    auditor_user_id: uuid.UUID | None = None
+    audit_owner_user_id: uuid.UUID | None = None
+    planned_start_at: datetime | None = None
+    description: str | None = None
+    status: str = "DRAFT"
+
+
+class QualityAuditUpdate(APIModel):
+    title: str | None = Field(default=None, min_length=2, max_length=200)
+    lab_audit_subtype: str | None = Field(default=None, max_length=60)
+    scope: str | None = None
+    process_name: str | None = Field(default=None, max_length=120)
+    department_id: uuid.UUID | None = None
+    checklist_id: uuid.UUID | None = None
+    standard_id: uuid.UUID | None = None
+    auditor_user_id: uuid.UUID | None = None
+    audit_owner_user_id: uuid.UUID | None = None
+    planned_start_at: datetime | None = None
+    description: str | None = None
+    status: str | None = None
+
+
+class QualityAuditRead(APIModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    branch_id: uuid.UUID
+    department_id: uuid.UUID | None
+    checklist_id: uuid.UUID | None
+    standard_id: uuid.UUID | None
+    audit_number: str
+    audit_type: str
+    lab_audit_subtype: str | None
+    title: str
+    scope: str | None
+    process_name: str | None
+    auditor_user_id: uuid.UUID | None
+    audit_owner_user_id: uuid.UUID | None
+    planned_start_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    closed_at: datetime | None
+    status: str
+    description: str | None
+    compliance_percent: float | None = None
+    is_demo: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditCheckResultCreate(APIModel):
+    checklist_item_id: uuid.UUID
+    result: str = Field(pattern="^(COMPLIANT|PARTIAL|NON_COMPLIANT|NOT_APPLICABLE)$")
+    score: int | None = Field(default=None, ge=0, le=100)
+    observation: str | None = None
+    evidence_required: bool = False
+    evidence_provided: bool = False
+
+
+class AuditCheckResultRead(APIModel):
+    id: uuid.UUID
+    audit_id: uuid.UUID
+    checklist_item_id: uuid.UUID
+    result: str
+    score: int | None
+    observation: str | None
+    evidence_required: bool
+    evidence_provided: bool
+    evaluated_by: uuid.UUID | None
+    evaluated_at: datetime | None
+    created_at: datetime
+
+
+class AuditFindingCreate(APIModel):
+    title: str = Field(min_length=2, max_length=200)
+    description: str = Field(min_length=2)
+    finding_type: str = Field(min_length=2, max_length=40)
+    severity: str = Field(pattern="^(CRITICAL|MAJOR|MINOR|OBSERVATION)$")
+    finding_number: str | None = Field(default=None, max_length=40)
+    checklist_result_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    standard_id: uuid.UUID | None = None
+    clause_id: uuid.UUID | None = None
+    analyzer_id: uuid.UUID | None = None
+    specimen_id: uuid.UUID | None = None
+    lab_result_id: uuid.UUID | None = None
+    worklist_item_id: uuid.UUID | None = None
+    referenced_entity_type: str | None = Field(default=None, max_length=80)
+    referenced_entity_id: str | None = Field(default=None, max_length=100)
+    requirement: str | None = None
+    root_cause: str | None = None
+    correction: str | None = None
+    corrective_action_required: bool = True
+    preventive_action_required: bool = False
+    owner_user_id: uuid.UUID | None = None
+    due_at: datetime | None = None
+    process_name: str | None = Field(default=None, max_length=120)
+    status: str = "OPEN"
+
+
+class AuditFindingUpdate(APIModel):
+    title: str | None = Field(default=None, min_length=2, max_length=200)
+    description: str | None = None
+    finding_type: str | None = Field(default=None, max_length=40)
+    severity: str | None = Field(default=None, pattern="^(CRITICAL|MAJOR|MINOR|OBSERVATION)$")
+    root_cause: str | None = None
+    correction: str | None = None
+    owner_user_id: uuid.UUID | None = None
+    due_at: datetime | None = None
+    status: str | None = None
+    process_name: str | None = Field(default=None, max_length=120)
+
+
+class AuditFindingRead(APIModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    branch_id: uuid.UUID
+    audit_id: uuid.UUID
+    checklist_result_id: uuid.UUID | None
+    department_id: uuid.UUID | None
+    standard_id: uuid.UUID | None
+    clause_id: uuid.UUID | None
+    analyzer_id: uuid.UUID | None
+    specimen_id: uuid.UUID | None
+    lab_result_id: uuid.UUID | None
+    worklist_item_id: uuid.UUID | None
+    referenced_entity_type: str | None
+    referenced_entity_id: str | None
+    finding_number: str
+    finding_type: str
+    severity: str
+    title: str
+    description: str
+    requirement: str | None
+    root_cause: str | None
+    correction: str | None
+    corrective_action_required: bool
+    preventive_action_required: bool
+    owner_user_id: uuid.UUID | None
+    due_at: datetime | None
+    status: str
+    closed_at: datetime | None
+    verified_at: datetime | None
+    process_name: str | None
+    is_demo: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditCapaCreate(APIModel):
+    capa_number: str | None = Field(default=None, max_length=40)
+    root_cause: str | None = None
+    immediate_correction: str | None = None
+    corrective_action: str | None = None
+    preventive_action: str | None = None
+    owner_user_id: uuid.UUID | None = None
+    priority: str = Field(default="MEDIUM", pattern="^(LOW|MEDIUM|HIGH|CRITICAL)$")
+    due_at: datetime | None = None
+    effectiveness_check_required: bool = True
+    status: str = "OPEN"
+
+
+class AuditCapaUpdate(APIModel):
+    root_cause: str | None = None
+    immediate_correction: str | None = None
+    corrective_action: str | None = None
+    preventive_action: str | None = None
+    owner_user_id: uuid.UUID | None = None
+    priority: str | None = Field(default=None, pattern="^(LOW|MEDIUM|HIGH|CRITICAL)$")
+    due_at: datetime | None = None
+    status: str | None = None
+    effectiveness_verified: bool | None = None
+    effectiveness_notes: str | None = None
+
+
+class AuditCapaRead(APIModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    finding_id: uuid.UUID
+    capa_number: str
+    root_cause: str | None
+    immediate_correction: str | None
+    corrective_action: str | None
+    preventive_action: str | None
+    owner_user_id: uuid.UUID | None
+    priority: str
+    due_at: datetime | None
+    status: str
+    effectiveness_check_required: bool
+    effectiveness_verified: bool
+    effectiveness_notes: str | None
+    verified_by: uuid.UUID | None
+    verified_at: datetime | None
+    closed_at: datetime | None
+    is_demo: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditEvidenceCreate(APIModel):
+    document_reference: str = Field(min_length=1, max_length=500)
+    description: str | None = None
+    finding_id: uuid.UUID | None = None
+    capa_id: uuid.UUID | None = None
+    version: str = "1"
+    verification_status: str = Field(default="PENDING", pattern="^(PENDING|VERIFIED|REJECTED)$")
+
+
+class AuditEvidenceRead(APIModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    audit_id: uuid.UUID | None
+    finding_id: uuid.UUID | None
+    capa_id: uuid.UUID | None
+    document_reference: str
+    description: str | None
+    uploaded_by: uuid.UUID | None
+    uploaded_at: datetime
+    version: str
+    verification_status: str
+    verified_by: uuid.UUID | None
+    verified_at: datetime | None
+    is_demo: bool
+    created_at: datetime
+
+
+class AuditChecklistItemRead(APIModel):
+    id: uuid.UUID
+    checklist_id: uuid.UUID
+    sequence: int
+    section: str | None
+    requirement: str
+    question: str
+    expected_evidence: str | None
+    severity_if_failed: str
+    applicable_department: str | None
+    clause_id: uuid.UUID | None
+    active: bool
+
+
+class AuditChecklistRead(APIModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    name: str
+    audit_type: str
+    version: str
+    status: str
+    description: str | None
+    is_demo: bool
+    items: list[AuditChecklistItemRead] = []
+
+
+class AuditStandardRead(APIModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    code: str
+    name: str
+    version: str
+    status: str
+    is_demo: bool
+
+
+class AuditClauseRead(APIModel):
+    id: uuid.UUID
+    standard_id: uuid.UUID
+    parent_clause_id: uuid.UUID | None
+    clause_code: str
+    title: str
+    description: str | None
+    sequence: int
+    active: bool
+    is_demo: bool
+
+
+class AuditNamedCountRead(APIModel):
+    key: str
+    label: str
+    count: int
+    value: float | None = None
+
+
+class AuditTrendPointRead(APIModel):
+    label: str
+    audits: int
+    findings: int
+    compliance_percent: float | None = None
+
+
+class AuditDashboardSummaryRead(APIModel):
+    total_audits: int
+    audits_this_month: int
+    scheduled: int
+    in_progress: int
+    completed: int
+    compliance_percent: float | None
+    open_findings: int
+    critical_findings: int
+    major_findings: int
+    minor_findings: int
+    high_risk_findings: int
+    overdue_capa: int
+    evidence_pending: int
+    closure_percent: float | None
+    average_closure_days: float | None
+
+
+class AuditDashboardAuditRowRead(APIModel):
+    id: uuid.UUID
+    audit_number: str
+    audit_type: str
+    lab_audit_subtype: str | None
+    title: str
+    scope: str | None
+    process_name: str | None
+    department_name: str | None
+    audit_date: datetime | None
+    auditor_name: str | None
+    status: str
+    findings: int
+    open_findings: int
+    compliance_percent: float | None
+    capa_status: str
+    is_demo: bool
+
+
+class AuditAlertRead(APIModel):
+    code: str
+    severity: str
+    message: str
+    entity_type: str
+    entity_id: str | None = None
+
+
+class AuditDashboardRead(APIModel):
+    audit_type: str
+    window_start: datetime
+    window_end: datetime
+    summary: AuditDashboardSummaryRead
+    trends: list[AuditTrendPointRead]
+    findings_by_clause: list[AuditNamedCountRead]
+    findings_by_department: list[AuditNamedCountRead]
+    findings_by_severity: list[AuditNamedCountRead]
+    findings_open_vs_closed: list[AuditNamedCountRead]
+    compliance_by_department: list[AuditNamedCountRead]
+    compliance_by_process: list[AuditNamedCountRead]
+    capa_aging: list[AuditNamedCountRead]
+    audits: list[AuditDashboardAuditRowRead]
+    alerts: list[AuditAlertRead]
     query_batches: int
