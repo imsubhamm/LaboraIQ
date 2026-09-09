@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity, Building2, GitBranch, LayoutDashboard, LogOut, Settings,
-  ShieldCheck, Users, ScrollText, FlaskConical, ClipboardPlus, TestTubes, ContactRound, ScanBarcode, Cpu, ListChecks, FileText
+  ShieldCheck, Users, ScrollText, FlaskConical, ClipboardPlus, TestTubes, ContactRound, ScanBarcode, Cpu, ListChecks, FileText, BadgeCheck, ClipboardList
 } from "lucide-react";
 import { can, Permission } from "@/lib/auth";
 
@@ -16,6 +16,8 @@ const navigation: Array<[string, string, React.ComponentType<{size?: number}>, P
   ["/analyzers", "Analyzers", Cpu, "analyzer.read"],
   ["/analyzers/worklist", "Analyzer worklist", ListChecks, "analyzer.read"],
   ["/results", "Results", FileText, "result.read"],
+  ["/nabl-audit-report", "NABL Audit Report", BadgeCheck, "quality_audit.read"],
+  ["/lab-audit-report", "LAB Audit Report", ClipboardList, "quality_audit.read"],
   ["/organizations", "Organizations", Building2, "organization.read"],
   ["/branches", "Branches", GitBranch, "branch.read"],
   ["/departments", "Departments", FlaskConical, "branch.read"],

@@ -302,3 +302,16 @@ tbody tr:hover { transform: scale(1.003); box-shadow: 0 7px 15px rgba(16, 56, 50
 .health-detail-grid p { margin:6px 0 0; color:var(--muted); font-size:11px; }
 .health-reasons { margin:0; padding-left:18px; color:var(--muted); font-size:12px; }
 @media (max-width:980px) { .health-kpi-grid, .health-trend-grid, .health-detail-grid { grid-template-columns:1fr; } }
+.health-kpis, .audit-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:18px; }
+.health-kpis article, .audit-kpis article { border:1px solid var(--line); border-radius:10px; background:white; padding:14px 16px; display:grid; gap:6px; }
+.health-kpis span, .audit-kpis span { font-size:11px; color:var(--muted); font-weight:600; }
+.health-kpis strong, .audit-kpis strong { font-size:22px; line-height:1; }
+.health-kpis small, .audit-kpis small { color:var(--muted); font-size:10px; }
+.audit-bar-list { list-style:none; margin:0; padding:8px 16px 16px; display:grid; gap:8px; }
+.audit-bar-list li { display:grid; grid-template-columns:minmax(90px,1.2fr) 2fr auto; gap:10px; align-items:center; font-size:11px; }
+.audit-bar-list div { background:#edf2f1; border-radius:999px; height:8px; overflow:hidden; }
+.audit-bar-list i { display:block; height:100%; background:var(--teal); border-radius:999px; }
+.audit-alert-list { list-style:none; margin:0; padding:0; }
+.audit-alert-list li { padding:10px 18px; border-top:1px solid #edf1f0; font-size:12px; }
+.audit-alert-list strong { text-transform:uppercase; margin-right:8px; font-size:10px; color:var(--muted); }
+@media (max-width:980px) { .health-kpis, .audit-kpis { grid-template-columns:1fr; }.audit-bar-list li { grid-template-columns:1fr; } }

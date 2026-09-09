@@ -16,6 +16,7 @@ from app.models import (
     UserRoleAssignment,
 )
 from app.seed_analyzer_health import seed_demo_if_ready
+from app.seed_quality_audit import seed_quality_if_ready
 
 PERMISSIONS = {
     "organization.read": "View organization configuration",
@@ -37,6 +38,8 @@ PERMISSIONS = {
     "result.review": "Perform technical review of results",
     "result.validate": "Pathologist validation of results",
     "result.release": "Release validated laboratory reports",
+    "quality_audit.read": "View quality audits, findings, CAPA, and audit reports",
+    "quality_audit.manage": "Manage quality audits, findings, CAPA, and evidence",
 }
 
 ROLE_TEMPLATES = {
@@ -63,6 +66,8 @@ ROLE_TEMPLATES = {
         "audit.read",
         "validation.read",
         "validation.manage",
+        "quality_audit.read",
+        "quality_audit.manage",
     ],
     "Billing User": ["branch.read"],
     "Collection User": ["branch.read"],
@@ -73,6 +78,7 @@ ROLE_TEMPLATES = {
         "role.read",
         "audit.read",
         "validation.read",
+        "quality_audit.read",
     ],
 }
 
@@ -251,6 +257,7 @@ def seed() -> None:
                 )
             )
         seed_demo_if_ready(db)
+        seed_quality_if_ready(db)
         db.commit()
 
 
