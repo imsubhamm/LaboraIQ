@@ -44,7 +44,10 @@ export function AnalyzerHealthPanel({ branches }: { branches: BranchOption[] }) 
   }, [branchId, vendor, model, dateFrom, dateTo]);
 
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
     // Reload when the branch scope changes; vendor/model/dates apply on submit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchId]);
