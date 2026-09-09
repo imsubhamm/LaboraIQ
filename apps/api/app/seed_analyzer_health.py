@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from typing import TypedDict
 from uuid import UUID
 
 from sqlalchemy import select
@@ -583,7 +584,19 @@ def seed_analyzer_health_demo(
     return True
 
 
-CLINICAL_FLEET = (
+class ClinicalFleetSpec(TypedDict):
+    code: str
+    vendor: str
+    model: str
+    protocol: str
+    host: str
+    port: int
+    test_code: str | None
+    machine_test_code: str
+    profile: str
+
+
+CLINICAL_FLEET: tuple[ClinicalFleetSpec, ...] = (
     {
         "code": "DEMO-HEM2",
         "vendor": "Beckman Coulter",
@@ -898,9 +911,7 @@ def _completed_orders(
         )
 
 
-def seed_clinical_fleet(
-    db: Session, organization: Organization, branch: Branch, user: User
-) -> int:
+def seed_clinical_fleet(db: Session, organization: Organization, branch: Branch, user: User) -> int:
     now = datetime.now(UTC)
     created = 0
     for spec in CLINICAL_FLEET:
@@ -947,8 +958,9 @@ def seed_clinical_fleet(
         )
         mapping = None
         test = None
-        if spec["test_code"]:
-            test = _catalog(db, organization.id, spec["test_code"])
+        test_code = spec["test_code"]
+        if test_code:
+            test = _catalog(db, organization.id, test_code)
             mapping = AnalyzerTestMapping(
                 organization_id=organization.id,
                 analyzer_id=analyzer.id,

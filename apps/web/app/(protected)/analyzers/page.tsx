@@ -40,8 +40,10 @@ export default function AnalyzersPage() {
   const [testingConnection,setTestingConnection]=useState(false);
   const [connectionResult,setConnectionResult]=useState<ConnectionResult|null>(null);
   useEffect(()=>{
-    const next=new URLSearchParams(window.location.search).get("view")==="health"?"health":"config";
-    setView(next);
+    const timer=window.setTimeout(()=>{
+      setView(new URLSearchParams(window.location.search).get("view")==="health"?"health":"config");
+    },0);
+    return()=>window.clearTimeout(timer);
   },[]);
   function selectView(next:"config"|"health"){setView(next);}
   const load=useCallback(async()=>{
@@ -55,7 +57,10 @@ export default function AnalyzersPage() {
     } catch(reason){setError(reason instanceof Error?reason.message:"Unable to load analyzers");}
     finally{setLoading(false);}
   },[]);
-  useEffect(()=>{void load();},[load]);
+  useEffect(()=>{
+    const timer=window.setTimeout(()=>{void load();},0);
+    return()=>window.clearTimeout(timer);
+  },[load]);
   useEffect(()=>{
     if(!mappingAnalyzer)return;
     let active=true;
